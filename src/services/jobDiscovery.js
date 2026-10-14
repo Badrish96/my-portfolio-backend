@@ -11,7 +11,10 @@ export class JobDiscoveryError extends Error {
 function buildSearchQuery(profile) {
   const roles = Array.isArray(profile.preferredRoles) ? profile.preferredRoles : [];
   const skills = Array.isArray(profile.verifiedSkills) ? profile.verifiedSkills.slice(0, 5) : [];
-  const query = [...roles, ...skills].filter(Boolean).join(" ").trim();
+  // Keep the source query broad enough to return jobs. The AI scorer applies
+  // the full skill profile after discovery; sending every role and skill as
+  // one query can make the source search overly restrictive.
+  const query = [roles[0], ...skills.slice(0, 2)].filter(Boolean).join(" ").trim();
   if (!query) throw new JobDiscoveryError("Add preferred roles or skills to your profile before discovering jobs.", "PROFILE_SEARCH_DATA_REQUIRED");
   return query;
 }
@@ -41,20 +44,43 @@ export async function discoverJobs(profile) {
   if (!response.ok) throw new JobDiscoveryError(`Adzuna returned HTTP ${response.status}.`, "JOB_SOURCE_REQUEST_FAILED");
 
   const payload = await response.json();
-  return (Array.isArray(payload.results) ? payload.results : []).map((job) => ({
+  const rawJobs = Array.isArray(payload.results) ? payload.results : [];
+  const jobs = rawJobs.map((job) => {
+    const title = job.title || "Untitled job";
+    const company = job.company?.display_name || "Unknown company";
+    const applicationUrl = job.redirect_url || job.url;
+    return {
     source: "adzuna",
     externalId: String(job.id),
-    title: job.title || "Untitled job",
-    company: job.company?.display_name || "Unknown company",
+    title,
+    company,
     location: job.location?.display_name || location || "",
-    description: job.description || "",
+    // Adzuna returns a short description snippet. It is still useful for
+    // matching, so do not reject the job just because the snippet is short.
+    description: job.description || `${title} at ${company}. Apply through the source listing.`,
     requiredSkills: [],
     salaryMin: job.salary_min,
     salaryMax: job.salary_max,
-    applicationUrl: job.redirect_url,
-    sourceUrl: job.redirect_url,
+    applicationUrl,
+    sourceUrl: applicationUrl,
     postedAt: job.created ? new Date(job.created) : new Date(),
     fetchedAt: new Date(),
     status: "open",
-  })).filter((job) => job.applicationUrl && job.description.length >= 20);
+    };
+  }).filter((job) => job.applicationUrl && job.title && job.company);
+
+  console.log("Adzuna discovery response:", {
+    country,
+    query: params.get("what"),
+    rawResults: rawJobs.length,
+    usableResults: jobs.length,
+  });
+
+  return {
+    jobs,
+    rawCount: rawJobs.length,
+    skippedCount: rawJobs.length - jobs.length,
+    country,
+    query: params.get("what"),
+  };
 }

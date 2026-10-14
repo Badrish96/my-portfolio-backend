@@ -125,8 +125,8 @@ router.get("/suggestions", authenticate, async (req, res) => {
 router.post("/discover", authenticate, async (req, res) => {
   try {
     const profile = getCandidateProfile(req.user);
-    const discoveredJobs = await discoverJobs(profile);
-    const savedJobs = await Promise.all(discoveredJobs.map((job) => Job.findOneAndUpdate(
+    const discovery = await discoverJobs(profile);
+    const savedJobs = await Promise.all(discovery.jobs.map((job) => Job.findOneAndUpdate(
       { source: job.source, externalId: job.externalId },
       { $set: job, $setOnInsert: { createdBy: req.user._id } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -143,7 +143,23 @@ router.post("/discover", authenticate, async (req, res) => {
     }));
     const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
     const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
-    return res.json({ success: true, discovered: savedJobs.length, aiScored, aiFailures, message: aiFailures ? "Jobs were imported, but some AI scores could not be calculated." : "Jobs discovered and scored successfully." });
+    const message = savedJobs.length === 0
+      ? "No usable jobs were returned by the job source. Check the search country, profile roles or skills, and Adzuna credentials."
+      : aiFailures
+        ? "Jobs were imported, but some AI scores could not be calculated."
+        : "Jobs discovered and scored successfully.";
+    return res.json({
+      success: true,
+      discovered: savedJobs.length,
+      rawResults: discovery.rawCount,
+      skippedResults: discovery.skippedCount,
+      aiScored,
+      aiFailures,
+      source: "adzuna",
+      country: discovery.country,
+      query: discovery.query,
+      message,
+    });
   } catch (error) {
     const status = error instanceof JobDiscoveryError && error.code === "JOB_SOURCE_NOT_CONFIGURED" ? 503 : error.code === "PROFILE_SEARCH_DATA_REQUIRED" ? 400 : 502;
     console.error("Job discovery failed:", error.message);
