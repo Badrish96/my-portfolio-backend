@@ -2,6 +2,7 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import morgan from "morgan";
+import compression from "compression";
 import connectDB from "./src/config/db.js";
 import authRoutes from "./src/routes/authRoutes.js";
 import jobRoutes from "./src/routes/jobRoutes.js";
@@ -9,9 +10,10 @@ import jobRoutes from "./src/routes/jobRoutes.js";
 dotenv.config({ path: [".env.local", ".env"] });
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(compression());
 app.use(cors());
-app.use(morgan("dev"));
+app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 connectDB();
 

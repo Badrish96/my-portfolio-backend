@@ -29,6 +29,7 @@ const demoJobs = [
 ];
 
 router.get("/", (req, res) => {
+  res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
   res.json(demoJobs);
 });
 

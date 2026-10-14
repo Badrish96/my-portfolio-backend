@@ -99,7 +99,9 @@ export const signup = async (req, res) => {
 
 export const signin = async (req, res) => {
   try {
-    const user = await User.findOne({ email: req.body.email.toLowerCase() }).select("+passwordHash");
+    const user = await User.findOne({ email: req.body.email.toLowerCase() }).select(
+      "+passwordHash _id name username email userType avatar bio location website roles stats"
+    );
     if (!user || !user.passwordHash || !(await verifyPassword(req.body.password, user.passwordHash))) {
       return res.status(401).json({ success: false, message: "Invalid email or password." });
     }
@@ -125,7 +127,9 @@ export const googleSignin = async (req, res) => {
     }
 
     const email = profile.email.toLowerCase();
-    let user = await User.findOne({ email });
+    let user = await User.findOne({ email }).select(
+      "_id name username email userType avatar bio location website roles stats provider providerId"
+    );
     if (!user) {
       user = await User.create({
         email,
