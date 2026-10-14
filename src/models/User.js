@@ -33,9 +33,7 @@ const UserSchema = new Schema(
     roles: { type: [String], default: ["user"] }, // admin, moderator, user
     followers: [{ type: Schema.Types.ObjectId, ref: "User" }], // optional; for heavy follow graphs, keep only counts and use Follow collection
     following: [{ type: Schema.Types.ObjectId, ref: "User" }],
-    bookmarks: [{ type: Schema.Types.ObjectId, ref: "Post" }], // saved posts
     stats: {
-      postsCount: { type: Number, default: 0 },
       followersCount: { type: Number, default: 0 },
       followingCount: { type: Number, default: 0 },
     },
