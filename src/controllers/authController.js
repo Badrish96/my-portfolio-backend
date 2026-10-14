@@ -1,168 +1,228 @@
-import axios from "axios";
+import { createHash, randomBytes, randomInt } from "node:crypto";
+import { OAuth2Client } from "google-auth-library";
 import User from "../models/User.js";
+import {
+  createAccessToken,
+  hashPassword,
+  publicUser,
+  verifyPassword,
+} from "../services/authService.js";
+import { isSmtpConfigured, sendPasswordResetCode } from "../services/emailService.js";
+
+const googleClient = new OAuth2Client();
+const hashValue = (value) => createHash("sha256").update(value).digest("hex");
+const genericResetMessage = "If an account exists for that email, a code has been sent.";
+
+const createUsername = async (name, email) => {
+  const base = (email.split("@")[0] || name)
+    .normalize("NFKD")
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 10) || "member";
+  let username = base;
+  let suffix = 1;
+
+  while (await User.exists({ username })) {
+    username = `${base.slice(0, 10 - String(suffix).length)}${suffix}`;
+    suffix += 1;
+  }
+
+  return username;
+};
+
+const respondWithSession = (res, user, status = 200) => res.status(status).json({
+  success: true,
+  token: createAccessToken(user),
+  user: publicUser(user),
+});
+
+export const currentUser = (req, res) => res.json({
+  success: true,
+  user: publicUser(req.user),
+});
 
 export const signup = async (req, res) => {
-  const { email, password, userType, username, name } = req.body;
+  const email = req.body.email.toLowerCase();
+  const { name, username, userType, password } = req.body;
 
   try {
-    // 1. Create user in Auth0 DB
-    const auth0Res = await axios.post(
-      `https://${process.env.AUTH0_DOMAIN}/dbconnections/signup`,
-      {
-        client_id: process.env.AUTH0_CLIENT_ID,
-        email: email.toLowerCase(),
-        password,
-        connection: process.env.AUTH0_DB_CONNECTION,
-        username,
-        given_name: name,
-        user_metadata: { 
-          userType,
-          username 
-        },
-        name
-      }
-    );
+    if (await User.exists({ $or: [{ email }, { username }] })) {
+      return res.status(409).json({ success: false, message: "An account with that email or username already exists." });
+    }
 
-    const auth0UserId = auth0Res.data._id;
-
-    // 2. Create user in MongoDB
     const user = await User.create({
       email,
       name,
       username,
       userType,
-      auth0Id: auth0UserId,
-      provider: 'auth0',
-      providerId: auth0UserId,
-      roles: ['user']
+      passwordHash: await hashPassword(password),
+      provider: "local",
+      roles: ["user"],
     });
-
-    return res.status(201).json({
-      success: true,
-      message: "Please check your email to verify your account",
-      user,
-    });
-  } catch (err) {
-    console.log(err?.response?.data || err);
-    console.log("ERROR RESPONSE:", err.response?.data);
-
-    return res.status(400).json({
-      success: false,
-      message: err.response?.data?.message || "Signup failed",
-    });
-  }
-};
-
-export const verifyEmail = async (req, res) => {
-  const { ticket } = req.query;
-
-  try {
-    // Verify the email with Auth0
-    await axios.post(`https://${process.env.AUTH0_DOMAIN}/oauth/token`, {
-      grant_type: "urn:auth0:verify-email",
-      client_id: process.env.AUTH0_CLIENT_ID,
-      client_secret: process.env.AUTH0_CLIENT_SECRET,
-      ticket,
-    });
-
-    // Redirect to frontend success page
-    return res.redirect(`${process.env.FRONTEND_URL}/email-verified`);
-  } catch (err) {
-    console.error(err);
-    return res.redirect(
-      `${process.env.FRONTEND_URL}/email-verification-failed`
-    );
+    return respondWithSession(res, user, 201);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, message: "Account already exists." });
+    }
+    console.error("Signup failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to create account." });
   }
 };
 
 export const signin = async (req, res) => {
-  const { email, password } = req.body;
-
   try {
-    // Get user info first to check email verification
-    const userInfoResponse = await axios.post(
-      `https://${process.env.AUTH0_DOMAIN}/oauth/token`,
-      {
-        grant_type: "password",
-        username: email,
-        password,
-        audience: process.env.AUTH0_AUDIENCE,
-        client_id: process.env.AUTH0_CLIENT_ID,
-        client_secret: process.env.AUTH0_CLIENT_SECRET,
-        scope: "openid profile email",
-      }
-    );
-
-    const { access_token, id_token } = userInfoResponse.data;
-
-    // Get user profile to check email verification
-    const userProfile = await axios.get(
-      `https://${process.env.AUTH0_DOMAIN}/userinfo`,
-      {
-        headers: { Authorization: `Bearer ${access_token}` },
-      }
-    );
-
-    if (!userProfile.data.email_verified) {
-      return res.status(401).json({
-        success: false,
-        message: "Please verify your email before signing in",
-      });
+    const user = await User.findOne({ email: req.body.email.toLowerCase() }).select("+passwordHash");
+    if (!user || !user.passwordHash || !(await verifyPassword(req.body.password, user.passwordHash))) {
+      return res.status(401).json({ success: false, message: "Invalid email or password." });
     }
-
-    // Set token cookie (HttpOnly)
-    res.cookie("token", access_token, {
-      httpOnly: true,
-      secure: false,
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    return res.json({
-      success: true,
-      token: access_token,
-      id_token,
-    });
-  } catch (err) {
-    return res.status(401).json({
-      success: false,
-      message: "Invalid email or password",
-    });
+    return respondWithSession(res, user);
+  } catch (error) {
+    console.error("Signin failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to sign in." });
   }
 };
+
 export const googleSignin = async (req, res) => {
-  const { googleToken } = req.body;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const credential = req.body.credential || req.body.googleToken;
+  if (!clientId) {
+    return res.status(503).json({ success: false, message: "Google sign-in is not configured." });
+  }
 
   try {
-    const auth0Res = await axios.post(
-      `https://${process.env.AUTH0_DOMAIN}/oauth/token`,
-      {
-        grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-        subject_token: googleToken,
-        subject_token_type: "http://auth0.com/oauth/token-type/google-id-token",
-        client_id: process.env.AUTH0_CLIENT_ID,
-        audience: process.env.AUTH0_AUDIENCE,
-      }
+    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: clientId });
+    const profile = ticket.getPayload();
+    if (!profile?.email || profile.email_verified !== true) {
+      return res.status(401).json({ success: false, message: "Google account email is not verified." });
+    }
+
+    const email = profile.email.toLowerCase();
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = await User.create({
+        email,
+        name: profile.name || email.split("@")[0],
+        username: await createUsername(profile.name || email, email),
+        userType: ["developer", "recruiter", "student"].includes(req.body.userType) ? req.body.userType : "developer",
+        avatar: profile.picture,
+        provider: "google",
+        providerId: profile.sub,
+        roles: ["user"],
+      });
+    } else if (!user.providerId) {
+      user.provider = user.provider || "google";
+      user.providerId = profile.sub;
+      if (!user.avatar && profile.picture) user.avatar = profile.picture;
+      await user.save();
+    }
+    return respondWithSession(res, user);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, message: "Unable to create Google account." });
+    }
+    return res.status(401).json({ success: false, message: "Google sign-in failed. Try again." });
+  }
+};
+
+export const forgotPassword = async (req, res) => {
+  try {
+    const email = req.body.email.toLowerCase();
+    const user = await User.findOne({ email }).select(
+      "+passwordResetSentAt +passwordResetOtpHash +passwordResetOtpExpires +passwordResetAttempts"
     );
+    if (!user) return res.json({ success: true, message: genericResetMessage });
 
-    const { access_token, id_token } = auth0Res.data;
+    const now = Date.now();
+    if (user.passwordResetSentAt && now - user.passwordResetSentAt.getTime() < 60_000) {
+      return res.json({ success: true, message: genericResetMessage });
+    }
+    const smtpConfigured = isSmtpConfigured();
+    if (!smtpConfigured && process.env.NODE_ENV === "production") {
+      return res.status(503).json({ success: false, message: "Password reset email is not configured." });
+    }
 
-    res.cookie("token", access_token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: false,
-    });
+    const otp = String(randomInt(0, 1_000_000)).padStart(6, "0");
+    user.passwordResetOtpHash = hashValue(otp);
+    user.passwordResetOtpExpires = new Date(now + 10 * 60_000);
+    user.passwordResetAttempts = 0;
+    user.passwordResetSentAt = new Date(now);
+    user.passwordResetTokenHash = undefined;
+    user.passwordResetTokenExpires = undefined;
+    await user.save();
+
+    if (smtpConfigured) {
+      try {
+        await sendPasswordResetCode(email, otp);
+      } catch (error) {
+        user.passwordResetOtpHash = undefined;
+        user.passwordResetOtpExpires = undefined;
+        user.passwordResetSentAt = undefined;
+        await user.save();
+        console.error("Password reset email failed:", error.message);
+        return res.status(503).json({ success: false, message: "Unable to send password reset email." });
+      }
+    }
 
     return res.json({
       success: true,
-      token: access_token,
-      id_token,
+      message: genericResetMessage,
+      ...(process.env.NODE_ENV !== "production" && !smtpConfigured ? { debugOtp: otp } : {}),
     });
-  } catch (err) {
-    console.log(err.response?.data);
-    return res.status(400).json({
-      success: false,
-      message: "Google signin failed",
-    });
+  } catch (error) {
+    console.error("Forgot password failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to start password reset." });
+  }
+};
+
+export const verifyResetOtp = async (req, res) => {
+  try {
+    const user = await User.findOne({ email: req.body.email.toLowerCase() }).select(
+      "+passwordResetOtpHash +passwordResetOtpExpires +passwordResetAttempts"
+    );
+    if (!user || !user.passwordResetOtpHash || user.passwordResetOtpExpires < new Date()) {
+      return res.status(400).json({ success: false, message: "The code is invalid or expired." });
+    }
+    if (user.passwordResetAttempts >= 5) {
+      return res.status(429).json({ success: false, message: "Too many attempts. Request a new code." });
+    }
+
+    user.passwordResetAttempts += 1;
+    if (hashValue(req.body.otp) !== user.passwordResetOtpHash) {
+      await user.save();
+      return res.status(400).json({ success: false, message: "The code is invalid or expired." });
+    }
+
+    const resetToken = randomBytes(32).toString("hex");
+    user.passwordResetOtpHash = undefined;
+    user.passwordResetOtpExpires = undefined;
+    user.passwordResetTokenHash = hashValue(resetToken);
+    user.passwordResetTokenExpires = new Date(Date.now() + 10 * 60_000);
+    await user.save();
+    return res.json({ success: true, resetToken });
+  } catch (error) {
+    console.error("OTP verification failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to verify reset code." });
+  }
+};
+
+export const resetPassword = async (req, res) => {
+  try {
+    const user = await User.findOne({ passwordResetTokenHash: hashValue(req.body.resetToken) })
+      .select("+passwordResetTokenHash +passwordResetTokenExpires");
+    if (!user || !user.passwordResetTokenExpires || user.passwordResetTokenExpires < new Date()) {
+      return res.status(400).json({ success: false, message: "The reset session is invalid or expired." });
+    }
+
+    user.passwordHash = await hashPassword(req.body.password);
+    user.passwordResetOtpHash = undefined;
+    user.passwordResetOtpExpires = undefined;
+    user.passwordResetAttempts = 0;
+    user.passwordResetSentAt = undefined;
+    user.passwordResetTokenHash = undefined;
+    user.passwordResetTokenExpires = undefined;
+    await user.save();
+    return res.json({ success: true, message: "Password reset successfully. You can now sign in." });
+  } catch (error) {
+    console.error("Password reset failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to reset password." });
   }
 };

@@ -27,8 +27,8 @@ export const signupValidation = [
     .trim()
     .isLength({ min: 2, max: 50 })
     .withMessage('Name must be between 2 and 50 characters')
-    .matches(/^[a-zA-Z\s]+$/)
-    .withMessage('Name can only contain letters and spaces')
+    .matches(/^[a-zA-Z\s.'-]+$/)
+    .withMessage('Name can only contain letters, spaces, periods, apostrophes, and hyphens')
     .not()
     .isEmpty()
     .withMessage('Name is required'),
@@ -56,7 +56,7 @@ export const signupValidation = [
   body('password')
     .isLength({ min: 8 })
     .withMessage('Password must be at least 8 characters long')
-    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/)
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/)
     .withMessage('Password must contain at least one uppercase letter, one lowercase letter, one number and one special character'),
 
   // UserType validation
@@ -77,4 +77,27 @@ export const signinValidation = [
     .not()
     .isEmpty()
     .withMessage('Password is required')
+];
+
+export const forgotPasswordValidation = [
+  body('email')
+    .trim()
+    .isEmail()
+    .withMessage('Please enter a valid email')
+    .normalizeEmail()
+    .toLowerCase(),
+];
+
+export const verifyResetOtpValidation = [
+  ...forgotPasswordValidation,
+  body('otp').matches(/^\d{6}$/).withMessage('Enter the 6-digit verification code'),
+];
+
+export const resetPasswordValidation = [
+  body('resetToken').isString().notEmpty().withMessage('Reset token is required'),
+  body('password')
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters long')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/)
+    .withMessage('Password must contain uppercase, lowercase, a number, and a special character'),
 ];

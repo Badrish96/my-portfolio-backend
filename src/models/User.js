@@ -20,7 +20,12 @@ const UserSchema = new Schema(
       lowercase: true,
       trim: true,
     },
-    passwordHash: { type: String }, // store hashed password or null if OAuth user
+    userType: {
+      type: String,
+      enum: ["developer", "recruiter", "student"],
+      default: "developer",
+    },
+    passwordHash: { type: String, select: false },
     avatar: { type: String }, // url to avatar
     bio: { type: String, maxlength: 1000 },
     location: { type: String },
@@ -38,8 +43,14 @@ const UserSchema = new Schema(
       emailNotifications: { type: Boolean, default: true },
       theme: { type: String, enum: ["dark", "light"], default: "dark" },
     },
-    provider: { type: String }, // 'local' | 'google' | 'github'
-    providerId: { type: String }, // if using OAuth
+    provider: { type: String },
+    providerId: { type: String },
+    passwordResetOtpHash: { type: String, select: false },
+    passwordResetOtpExpires: { type: Date, select: false },
+    passwordResetAttempts: { type: Number, default: 0, select: false },
+    passwordResetSentAt: { type: Date, select: false },
+    passwordResetTokenHash: { type: String, select: false },
+    passwordResetTokenExpires: { type: Date, select: false },
   },
   { timestamps: true }
 );
