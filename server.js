@@ -6,7 +6,7 @@ import connectDB from "./src/config/db.js";
 import authRoutes from "./src/routes/authRoutes.js";
 import jobRoutes from "./src/routes/jobRoutes.js";
 
-dotenv.config();
+dotenv.config({ path: [".env.local", ".env"] });
 const app = express();
 
 app.use(express.json());
