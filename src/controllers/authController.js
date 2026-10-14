@@ -47,6 +47,11 @@ export const updateProfile = async (req, res) => {
   for (const field of allowedFields) {
     if (req.body[field] !== undefined) updates[field] = String(req.body[field]).trim();
   }
+  for (const field of ["skills", "preferredRoles", "preferredLocations"]) {
+    if (Array.isArray(req.body[field])) updates[field] = req.body[field].map((value) => String(value).trim()).filter(Boolean).slice(0, 50);
+  }
+  if (req.body.experienceYears !== undefined) updates.experienceYears = Number(req.body.experienceYears);
+  if (req.body.expectedCompensation !== undefined) updates.expectedCompensation = Number(req.body.expectedCompensation);
 
   if (updates.name !== undefined && (updates.name.length < 2 || updates.name.length > 50)) {
     return res.status(400).json({ success: false, message: "Name must be between 2 and 50 characters." });
@@ -100,7 +105,7 @@ export const signup = async (req, res) => {
 export const signin = async (req, res) => {
   try {
     const user = await User.findOne({ email: req.body.email.toLowerCase() }).select(
-      "+passwordHash _id name username email userType avatar bio location website roles stats"
+      "+passwordHash _id name username email userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats"
     );
     if (!user || !user.passwordHash || !(await verifyPassword(req.body.password, user.passwordHash))) {
       return res.status(401).json({ success: false, message: "Invalid email or password." });
@@ -128,7 +133,7 @@ export const googleSignin = async (req, res) => {
 
     const email = profile.email.toLowerCase();
     let user = await User.findOne({ email }).select(
-      "_id name username email userType avatar bio location website roles stats provider providerId"
+      "_id name username email userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats provider providerId"
     );
     if (!user) {
       user = await User.create({

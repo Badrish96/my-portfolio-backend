@@ -12,7 +12,7 @@ export const authenticate = async (req, res, next) => {
   try {
     const claims = jwt.verify(token, getJwtSecret());
     const user = await User.findById(claims.sub).select(
-      "_id name username email userType avatar bio location website roles stats provider providerId"
+      "_id name username email userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats provider providerId"
     ).lean();
     if (!user) {
       return res.status(401).json({ success: false, message: "Authentication required." });

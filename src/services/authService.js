@@ -28,6 +28,11 @@ export const publicUser = (user) => ({
   bio: user.bio || "",
   location: user.location || "",
   website: user.website || "",
+  skills: user.skills || [],
+  preferredRoles: user.preferredRoles || [],
+  preferredLocations: user.preferredLocations || [],
+  experienceYears: user.experienceYears ?? null,
+  expectedCompensation: user.expectedCompensation ?? null,
   stats: user.stats || { followersCount: 0, followingCount: 0 },
   roles: user.roles,
 });

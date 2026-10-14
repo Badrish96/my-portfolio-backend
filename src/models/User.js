@@ -30,6 +30,11 @@ const UserSchema = new Schema(
     bio: { type: String, maxlength: 1000 },
     location: { type: String },
     website: { type: String },
+    skills: { type: [String], default: [] },
+    preferredRoles: { type: [String], default: [] },
+    preferredLocations: { type: [String], default: [] },
+    experienceYears: { type: Number, min: 0, max: 80 },
+    expectedCompensation: { type: Number, min: 0 },
     roles: { type: [String], default: ["user"] }, // admin, moderator, user
     followers: [{ type: Schema.Types.ObjectId, ref: "User" }], // optional; for heavy follow graphs, keep only counts and use Follow collection
     following: [{ type: Schema.Types.ObjectId, ref: "User" }],

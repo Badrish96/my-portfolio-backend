@@ -6,6 +6,7 @@ import compression from "compression";
 import connectDB from "./src/config/db.js";
 import authRoutes from "./src/routes/authRoutes.js";
 import jobRoutes from "./src/routes/jobRoutes.js";
+import applicationRoutes from "./src/routes/applicationRoutes.js";
 
 dotenv.config({ path: [".env.local", ".env"] });
 const app = express();
@@ -19,6 +20,7 @@ connectDB();
 
 app.use("/api/auth", authRoutes);
 app.use("/api/jobs", jobRoutes);
+app.use("/api/applications", applicationRoutes);
 app.use("/api/ai", jobRoutes);
 
 app.get("/", (req, res) => {
