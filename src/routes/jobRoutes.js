@@ -9,6 +9,25 @@ import { createAIProvider } from "../services/aiProvider.js";
 import { discoverJobs, JobDiscoveryError } from "../services/jobDiscovery.js";
 
 const router = express.Router();
+const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
+
+async function scoreWithLimit(items, worker) {
+  const results = [];
+  let cursor = 0;
+  const runWorker = async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await worker(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(SCORE_CONCURRENCY, items.length) }, runWorker));
+  return results;
+}
 
 const jobInput = z.object({
   title: z.string().trim().min(2).max(200),
@@ -132,7 +151,7 @@ router.post("/discover", authenticate, async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
 
-    const scoreResults = await Promise.allSettled(savedJobs.slice(0, 10).map(async (job) => {
+    const scoreResults = await scoreWithLimit(savedJobs.slice(0, 10), async (job) => {
       const result = await scoreJob(profile, job);
       await JobMatch.findOneAndUpdate(
         { user: req.user._id, job: job._id },
@@ -140,7 +159,7 @@ router.post("/discover", authenticate, async (req, res) => {
         { upsert: true, new: true, setDefaultsOnInsert: true },
       );
       return result;
-    }));
+    });
     const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
     const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
     const message = savedJobs.length === 0
@@ -180,10 +199,10 @@ router.post("/import", authenticate, async (req, res) => {
       { $set: { ...job, fetchedAt: new Date(), status: "open", sourceUrl: job.sourceUrl || job.applicationUrl }, $setOnInsert: { createdBy: req.user._id } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
-    const scores = await Promise.allSettled(savedJobs.slice(0, 10).map(async (job) => {
+    const scores = await scoreWithLimit(savedJobs.slice(0, 10), async (job) => {
       const result = await scoreJob(profile, job);
       await JobMatch.findOneAndUpdate({ user: req.user._id, job: job._id }, { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() }, { upsert: true, new: true, setDefaultsOnInsert: true });
-    }));
+    });
     return res.json({ success: true, imported: savedJobs.length, aiScored: scores.filter((result) => result.status === "fulfilled").length, aiFailures: scores.filter((result) => result.status === "rejected").length });
   } catch (error) {
     console.error("Local job import failed:", error.message);
