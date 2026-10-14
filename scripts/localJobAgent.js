@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { existsSync } from "node:fs";
 import { chromium } from "playwright";
 
 const args = new Map();
@@ -14,8 +15,13 @@ const token = String(args.get("token") || process.env.PORTFOLIO_AUTH_TOKEN || ""
 const keywords = String(args.get("keywords") || process.env.JOB_SEARCH_KEYWORDS || "React Developer");
 const location = String(args.get("location") || process.env.JOB_SEARCH_LOCATION || "India");
 const profileDir = process.env.LOCAL_BROWSER_PROFILE_DIR || ".local-browser-profile";
+const dryRun = Boolean(args.get("dry-run"));
+const waitMs = Math.max(Number(args.get("wait") || 8_000), 1_000);
+const installedChrome = process.env.LOCAL_CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const chromeUserDataDir = process.env.LOCAL_CHROME_USER_DATA_DIR || "";
+const chromeProfile = process.env.LOCAL_CHROME_PROFILE || "Default";
 
-if (!token) {
+if (!token && !dryRun) {
   console.error("Set PORTFOLIO_AUTH_TOKEN or pass --token with a valid portfolio login token.");
   process.exit(1);
 }
@@ -29,38 +35,54 @@ const searchUrl = site === "linkedin"
   ? `https://www.linkedin.com/jobs/search/?keywords=${encode(keywords)}&location=${encode(location)}`
   : `https://www.naukri.com/${keywords.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-jobs-in-${location.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
-const context = await chromium.launchPersistentContext(profileDir, { headless: false });
+const context = await chromium.launchPersistentContext(chromeUserDataDir || profileDir, {
+  headless: false,
+  ...(chromeUserDataDir ? { args: [`--profile-directory=${chromeProfile}`] } : {}),
+  ...(existsSync(installedChrome) ? { executablePath: installedChrome } : {}),
+});
 const page = context.pages()[0] || await context.newPage();
 await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
 console.log(`Opened ${site} job search. If login or CAPTCHA is shown, complete it in the browser window.`);
-await page.waitForTimeout(8_000);
+await page.waitForTimeout(waitMs);
 
 const jobs = await page.evaluate((currentSite) => {
   const selectors = currentSite === "linkedin"
-    ? ["li.jobs-search-results__list-item", ".job-card-container", "li[data-occludable-job-id]"]
+    ? ["li.jobs-search-results__list-item", ".job-card-container", "li[data-occludable-job-id]", "main li"]
     : ["article.jobTuple", ".srp-jobtuple-wrapper", "div.jobTuple"];
-  const cards = selectors.flatMap((selector) => [...document.querySelectorAll(selector)]);
+  const cards = selectors.flatMap((selector) => [...document.querySelectorAll(selector)])
+    .filter((card) => currentSite !== "linkedin" || card.querySelector('a[href*="/jobs/view/"]'));
   const text = (root, selectorsToTry) => selectorsToTry.map((selector) => root.querySelector(selector)?.textContent?.trim()).find(Boolean) || "";
   const href = (root, selectorsToTry) => selectorsToTry.map((selector) => root.querySelector(selector)?.href).find(Boolean) || "";
   return [...new Map(cards.map((card, index) => {
-    const url = href(card, currentSite === "linkedin" ? ["a.base-card__full-link", "a.job-card-container__link", "a"] : ["a.title", "a"]);
+    const url = href(card, currentSite === "linkedin" ? ['a[href*="/jobs/view/"]', "a.base-card__full-link", "a.job-card-container__link", "a"] : ["a.title", "a"]);
     return [url || `${currentSite}-${index}`, {
       source: currentSite,
       externalId: url || `${currentSite}-${index}`,
-      title: text(card, currentSite === "linkedin" ? ["h3.base-search-card__title", ".job-card-list__title", "h3"] : [".title", "a.title"]),
+      title: text(card, currentSite === "linkedin" ? ["h3.base-search-card__title", ".job-card-list__title", "h3", 'a[href*="/jobs/view/"]'] : [".title", "a.title"]),
       company: text(card, currentSite === "linkedin" ? ["h4.base-search-card__subtitle", ".job-card-container__company-name", "h4"] : [".comp-name", ".companyInfo a"]),
       location: text(card, currentSite === "linkedin" ? [".job-search-card__location", ".job-card-container__metadata-item"] : [".locWdth", ".loc"]),
       description: text(card, currentSite === "linkedin" ? [".base-search-card__snippet", ".job-card-list__description"] : [".job-desc", ".job-description"]),
       applicationUrl: url,
       sourceUrl: url,
     }];
-  }))].map(([, job]) => job).filter((job) => job.title && job.company && job.applicationUrl && job.description.length >= 20);
+  }))].map(([, job]) => ({
+    ...job,
+    // Search result cards frequently omit the full description. Keep the
+    // listing and let the backend score it using the available job details.
+    description: job.description || `${job.title} at ${job.company}. Review the original listing for the full requirements.`,
+  })).filter((job) => job.title && job.company && job.applicationUrl);
 }, site);
 
 if (!jobs.length) {
   console.error("No jobs were extracted. The site may require login, CAPTCHA, or its page structure may have changed.");
   await context.close();
   process.exit(2);
+}
+
+if (dryRun) {
+  console.log(JSON.stringify({ site, found: jobs.length, jobs }, null, 2));
+  await context.close();
+  process.exit(0);
 }
 
 const response = await fetch(`${apiBase}/api/jobs/import`, {
