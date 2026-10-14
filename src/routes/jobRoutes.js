@@ -6,6 +6,7 @@ import Application from "../models/Application.js";
 import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
+import { discoverJobs, JobDiscoveryError } from "../services/jobDiscovery.js";
 
 const router = express.Router();
 
@@ -29,6 +30,18 @@ const scoringInput = z.object({
   job: z.record(z.unknown()),
 });
 
+const importedJobInput = z.object({
+  source: z.enum(["linkedin", "naukri"]),
+  externalId: z.string().trim().min(1).max(300),
+  title: z.string().trim().min(2).max(200),
+  company: z.string().trim().min(1).max(160),
+  location: z.string().trim().max(160).optional().default(""),
+  description: z.string().trim().min(20).max(30_000),
+  applicationUrl: z.string().url(),
+  sourceUrl: z.string().url().optional(),
+  postedAt: z.coerce.date().optional(),
+});
+
 const getCandidateProfile = (user) => ({
   name: user.name,
   email: user.email,
@@ -36,6 +49,8 @@ const getCandidateProfile = (user) => ({
   userType: user.userType,
   bio: user.bio || "",
   verifiedSkills: user.skills || [],
+  preferredRoles: user.preferredRoles || [],
+  preferredLocations: user.preferredLocations || [],
   verifiedExperienceYears: user.experienceYears || null,
 });
 
@@ -104,6 +119,59 @@ router.get("/suggestions", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Job suggestions failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load job suggestions." });
+  }
+});
+
+router.post("/discover", authenticate, async (req, res) => {
+  try {
+    const profile = getCandidateProfile(req.user);
+    const discoveredJobs = await discoverJobs(profile);
+    const savedJobs = await Promise.all(discoveredJobs.map((job) => Job.findOneAndUpdate(
+      { source: job.source, externalId: job.externalId },
+      { $set: job, $setOnInsert: { createdBy: req.user._id } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean()));
+
+    const scoreResults = await Promise.allSettled(savedJobs.slice(0, 10).map(async (job) => {
+      const result = await scoreJob(profile, job);
+      await JobMatch.findOneAndUpdate(
+        { user: req.user._id, job: job._id },
+        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      return result;
+    }));
+    const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
+    const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
+    return res.json({ success: true, discovered: savedJobs.length, aiScored, aiFailures, message: aiFailures ? "Jobs were imported, but some AI scores could not be calculated." : "Jobs discovered and scored successfully." });
+  } catch (error) {
+    const status = error instanceof JobDiscoveryError && error.code === "JOB_SOURCE_NOT_CONFIGURED" ? 503 : error.code === "PROFILE_SEARCH_DATA_REQUIRED" ? 400 : 502;
+    console.error("Job discovery failed:", error.message);
+    return res.status(status).json({ success: false, message: error.message || "Unable to discover jobs." });
+  }
+});
+
+router.post("/import", authenticate, async (req, res) => {
+  const jobs = Array.isArray(req.body?.jobs) ? req.body.jobs.slice(0, 50) : [];
+  if (!jobs.length) return res.status(400).json({ success: false, message: "At least one job is required." });
+  const parsedJobs = jobs.map((job) => importedJobInput.safeParse(job)).filter((result) => result.success).map((result) => result.data);
+  if (!parsedJobs.length) return res.status(400).json({ success: false, message: "No valid LinkedIn or Naukri jobs were supplied." });
+
+  try {
+    const profile = getCandidateProfile(req.user);
+    const savedJobs = await Promise.all(parsedJobs.map((job) => Job.findOneAndUpdate(
+      { source: job.source, externalId: job.externalId },
+      { $set: { ...job, fetchedAt: new Date(), status: "open", sourceUrl: job.sourceUrl || job.applicationUrl }, $setOnInsert: { createdBy: req.user._id } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean()));
+    const scores = await Promise.allSettled(savedJobs.slice(0, 10).map(async (job) => {
+      const result = await scoreJob(profile, job);
+      await JobMatch.findOneAndUpdate({ user: req.user._id, job: job._id }, { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() }, { upsert: true, new: true, setDefaultsOnInsert: true });
+    }));
+    return res.json({ success: true, imported: savedJobs.length, aiScored: scores.filter((result) => result.status === "fulfilled").length, aiFailures: scores.filter((result) => result.status === "rejected").length });
+  } catch (error) {
+    console.error("Local job import failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to import local jobs." });
   }
 });
 
