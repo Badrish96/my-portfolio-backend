@@ -25,5 +25,9 @@ export const publicUser = (user) => ({
   email: user.email,
   userType: user.userType,
   avatar: user.avatar,
+  bio: user.bio || "",
+  location: user.location || "",
+  website: user.website || "",
+  stats: user.stats || { postsCount: 0, followersCount: 0, followingCount: 0 },
   roles: user.roles,
 });

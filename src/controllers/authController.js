@@ -40,6 +40,35 @@ export const currentUser = (req, res) => res.json({
   user: publicUser(req.user),
 });
 
+export const updateProfile = async (req, res) => {
+  const allowedFields = ["name", "username", "bio", "location", "website", "userType"];
+  const updates = {};
+
+  for (const field of allowedFields) {
+    if (req.body[field] !== undefined) updates[field] = String(req.body[field]).trim();
+  }
+
+  if (updates.name !== undefined && (updates.name.length < 2 || updates.name.length > 50)) {
+    return res.status(400).json({ success: false, message: "Name must be between 2 and 50 characters." });
+  }
+  if (updates.username !== undefined && !/^[a-zA-Z0-9_-]{3,15}$/.test(updates.username)) {
+    return res.status(400).json({ success: false, message: "Username must be 3-15 letters, numbers, underscores, or hyphens." });
+  }
+  if (updates.userType !== undefined && !["developer", "recruiter", "student"].includes(updates.userType)) {
+    return res.status(400).json({ success: false, message: "Invalid user type." });
+  }
+  if (updates.website && !/^https?:\/\//i.test(updates.website)) updates.website = `https://${updates.website}`;
+
+  try {
+    const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true, runValidators: true });
+    return res.json({ success: true, user: publicUser(user) });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ success: false, message: "That username is already in use." });
+    console.error("Profile update failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to update profile." });
+  }
+};
+
 export const signup = async (req, res) => {
   const email = req.body.email.toLowerCase();
   const { name, username, userType, password } = req.body;
