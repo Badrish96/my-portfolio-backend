@@ -15,6 +15,7 @@ const ApplicationSchema = new Schema(
     answers: { type: Schema.Types.Mixed },
     errorHistory: [{ message: String, createdAt: { type: Date, default: Date.now } }],
     approvedAt: { type: Date },
+    submittedAt: { type: Date },
   },
   { timestamps: true }
 );
