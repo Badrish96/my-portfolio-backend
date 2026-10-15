@@ -25,7 +25,7 @@ function getBoardMatch(parsedUrl) {
   const urlPatterns = [];
   const addPathPattern = (path) => {
     if (!source || !path || path === "/") return;
-    const pattern = new RegExp(`${escapeRegex(path.replace(/\/+$/, ""))}(?:[?#]|$)`, "i");
+    const pattern = new RegExp(`${escapeRegex(path.replace(/\/+$/, ""))}/?(?:[?#]|$)`, "i");
     urlPatterns.push(
       { source, applicationUrl: { $regex: pattern } },
       { source, sourceUrl: { $regex: pattern } },
