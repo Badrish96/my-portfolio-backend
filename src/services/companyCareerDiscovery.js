@@ -1,4 +1,5 @@
 import { deduplicateJobs, isAllowedJobLocation, isQualityJob, normalizeJobText } from "./jobDiscovery.js";
+import { canonicalSkill, extractSkills } from "./skillMatching.js";
 
 const DEFAULT_LIMIT = 100;
 const CAREER_PAGE_HEADERS = {
@@ -64,18 +65,20 @@ function locationText(value) {
 
 function potentialProfileMatch(job, profile) {
   const roleTerms = (profile.preferredRoles || [])
-    .map(normalizeJobText)
+    .map(canonicalSkill)
     .filter((term) => term.length >= 3);
   const skillTerms = (profile.verifiedSkills || [])
     .map(normalizeJobText)
     .filter((term) => term.length >= 3);
   if (!roleTerms.length && !skillTerms.length) return true;
   const title = normalizeJobText(job.title);
+  const descriptionSkills = extractSkills(`${job.title} ${job.description}`);
   const titleMatchesRole = roleTerms.some((term) => title.includes(term));
   const titleMatchesSkill = skillTerms.some((term) => title.includes(term));
+  const descriptionMatchesSkill = skillTerms.some((term) => descriptionSkills.includes(term) || normalizeJobText(job.description).includes(term));
   const clearlyUnrelated = /\b(program manager|project manager|product manager|account executive|sales|recruiter|accountant|legal|finance|human resources|talent partner|intern|trainee)\b/.test(title);
   const relevantEngineeringTitle = /\b(frontend|front end|full stack|software engineer|software developer|web developer|application developer|ui engineer|react|javascript|typescript|node)\b/.test(title);
-  return !clearlyUnrelated && (titleMatchesRole || titleMatchesSkill || relevantEngineeringTitle);
+  return !clearlyUnrelated && (titleMatchesRole || titleMatchesSkill || descriptionMatchesSkill || relevantEngineeringTitle);
 }
 
 function normalizeJob(company, raw, fields) {
@@ -91,7 +94,9 @@ function normalizeJob(company, raw, fields) {
     company: company.company,
     location,
     description: description.slice(0, 30000),
-    requiredSkills: Array.isArray(fields.requiredSkills) ? fields.requiredSkills : [],
+    requiredSkills: Array.isArray(fields.requiredSkills) && fields.requiredSkills.length
+      ? fields.requiredSkills
+      : extractSkills(`${title} ${description}`),
     applicationUrl,
     sourceUrl: applicationUrl,
     postedAt: fields.postedAt ? new Date(fields.postedAt) : new Date(),
@@ -236,7 +241,7 @@ export async function discoverCompanyCareerJobs(profile) {
   const limit = Math.min(Math.max(Number(process.env.COMPANY_CAREER_JOB_LIMIT) || DEFAULT_LIMIT, 1), 500);
   const results = await Promise.allSettled(companies.map(fetchCompanyJobs));
   const jobs = results.flatMap((result) => result.status === "fulfilled" ? result.value : [])
-    .filter((job) => isAllowedJobLocation(job.location) && isQualityJob(job) && potentialProfileMatch(job, profile));
+    .filter((job) => isAllowedJobLocation(job.location, profile.preferredLocations) && isQualityJob(job) && potentialProfileMatch(job, profile));
   const failures = results.filter((result) => result.status === "rejected").length;
   const sourceDetails = results.map((result, index) => ({
     company: companies[index].company,

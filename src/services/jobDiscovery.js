@@ -1,7 +1,19 @@
 const ADZUNA_BASE_URL = "https://api.adzuna.com/v1/api/jobs";
+import { extractSkills } from "./skillMatching.js";
 
 export const DEFAULT_JOB_LOCATIONS = ["Gurugram", "Bangalore", "Noida", "Delhi NCR"];
 const EXCLUDED_COMPANIES = new Set(["dataannotation"]);
+const LOCATION_ALIASES = {
+  gurugram: ["gurugram", "gurgaon"],
+  bangalore: ["bangalore", "bengaluru", "banglore"],
+  noida: ["noida", "greater noida"],
+  "delhi ncr": ["delhi", "new delhi", "delhi ncr", "ncr"],
+  hyderabad: ["hyderabad", "secunderabad"],
+  pune: ["pune", "pimpri"],
+  mumbai: ["mumbai", "bombay", "thane"],
+  chennai: ["chennai", "madras"],
+  remote: ["remote", "work from home", "wfh", "anywhere"],
+};
 export const allowedJobLocationFilter = {
   $or: [
     { location: /\b(gurugram|gurgaon)\b/i },
@@ -19,29 +31,36 @@ export class JobDiscoveryError extends Error {
   }
 }
 
-function buildSearchQuery(profile) {
+function buildSearchQueries(profile) {
   const roles = Array.isArray(profile.preferredRoles) ? profile.preferredRoles : [];
   const skills = Array.isArray(profile.verifiedSkills) ? profile.verifiedSkills.slice(0, 5) : [];
-  // Keep the source query broad enough to return jobs. Location is constrained separately.
-  const query = [roles[0], ...skills.slice(0, 2)].filter(Boolean).join(" ").trim();
-  if (!query) throw new JobDiscoveryError("Add preferred roles or skills to your profile before discovering jobs.", "PROFILE_SEARCH_DATA_REQUIRED");
-  return query;
+  const queries = roles.flatMap((role) => [
+    [role, ...skills.slice(0, 2)],
+    [role, skills[2], skills[3]],
+  ]).map((parts) => parts.filter(Boolean).join(" ").trim()).filter(Boolean);
+  if (!queries.length && skills.length) queries.push(skills.slice(0, 3).join(" "));
+  if (!queries.length) throw new JobDiscoveryError("Add preferred roles or skills to your profile before discovering jobs.", "PROFILE_SEARCH_DATA_REQUIRED");
+  return [...new Set(queries)].slice(0, 10);
 }
 
-function allowedLocations() {
+function allowedLocations(profile) {
+  const preferred = Array.isArray(profile?.preferredLocations) ? profile.preferredLocations.map((location) => String(location).trim()).filter(Boolean) : [];
+  if (preferred.length) return preferred;
   const configured = String(process.env.JOB_SEARCH_LOCATIONS || "")
     .split(",")
     .map((location) => location.trim())
-    .filter((location) => isAllowedJobLocation(location));
+    .filter(Boolean);
   return configured.length ? configured : DEFAULT_JOB_LOCATIONS;
 }
 
-export function isAllowedJobLocation(location) {
-  const normalized = String(location || "").toLowerCase();
-  return /\b(gurugram|gurgaon)\b/.test(normalized)
-    || /\b(bangalore|bengaluru|banglore)\b/.test(normalized)
-    || /\b(?:greater\s+)?noida\b/.test(normalized)
-    || /\b(?:new\s+)?delhi(?:\s+ncr)?\b/.test(normalized);
+export function isAllowedJobLocation(location, preferredLocations = DEFAULT_JOB_LOCATIONS) {
+  const normalized = normalizeJobText(location);
+  const requested = Array.isArray(preferredLocations) && preferredLocations.length ? preferredLocations : DEFAULT_JOB_LOCATIONS;
+  return requested.some((preference) => {
+    const key = normalizeJobText(preference);
+    const aliases = LOCATION_ALIASES[key] || [key];
+    return aliases.some((alias) => new RegExp(`\\b${normalizeJobText(alias).replace(/ /g, "\\s+")}\\b`, "i").test(normalized));
+  });
 }
 
 export function normalizeJobText(value) {
@@ -128,11 +147,11 @@ export async function discoverJobs(profile) {
   if (!appId || !appKey) throw new JobDiscoveryError("ADZUNA_APP_ID and ADZUNA_APP_KEY are not configured.", "JOB_SOURCE_NOT_CONFIGURED");
 
   const country = (process.env.JOB_SEARCH_COUNTRY || "in").toLowerCase();
-  const query = buildSearchQuery(profile);
-  const locations = allowedLocations();
+  const queries = buildSearchQueries(profile);
+  const locations = allowedLocations(profile);
   const requestedResults = Math.min(Number(process.env.JOB_SEARCH_RESULTS) || 20, 50);
-  const resultsPerLocation = Math.max(5, Math.ceil(requestedResults / locations.length));
-  const rawJobs = (await Promise.all(locations.map((location) => searchLocation({ appId, appKey, country, query, location, resultsPerPage: resultsPerLocation })))).flat();
+  const resultsPerRequest = Math.max(5, Math.ceil(requestedResults / Math.max(1, locations.length * queries.length)));
+  const rawJobs = (await Promise.all(queries.flatMap((query) => locations.map((location) => searchLocation({ appId, appKey, country, query, location, resultsPerPage: resultsPerRequest }))))).flat();
   const seen = new Set();
   const jobs = rawJobs.map((job) => {
     const title = job.title || "Untitled job";
@@ -145,7 +164,7 @@ export async function discoverJobs(profile) {
       company,
       location: job.location?.display_name || "",
       description: job.description || `${title} at ${company}. Apply through the source listing.`,
-      requiredSkills: [],
+      requiredSkills: extractSkills(`${title} ${job.description || ""}`),
       salaryMin: job.salary_min,
       salaryMax: job.salary_max,
       salaryCurrency: job.salary_currency || "INR",
@@ -157,12 +176,12 @@ export async function discoverJobs(profile) {
     };
   }).filter((job) => {
     const key = job.externalId || job.applicationUrl;
-    if (!job.applicationUrl || !job.title || !job.company || !isAllowedJobLocation(job.location) || seen.has(key) || !isQualityJob(job)) return false;
+    if (!job.applicationUrl || !job.title || !job.company || !isAllowedJobLocation(job.location, locations) || seen.has(key) || !isQualityJob(job)) return false;
     seen.add(key);
     return true;
   });
   const deduplicatedJobs = deduplicateJobs(jobs).slice(0, requestedResults);
 
-  console.log("Adzuna discovery response:", { country, query, locations, rawResults: rawJobs.length, allowedResults: deduplicatedJobs.length });
-  return { jobs: deduplicatedJobs, rawCount: rawJobs.length, skippedCount: rawJobs.length - deduplicatedJobs.length, country, query, locations };
+  console.log("Adzuna discovery response:", { country, queries, locations, rawResults: rawJobs.length, allowedResults: deduplicatedJobs.length });
+  return { jobs: deduplicatedJobs, rawCount: rawJobs.length, skippedCount: rawJobs.length - deduplicatedJobs.length, country, query: queries.join(" | "), queries, locations };
 }

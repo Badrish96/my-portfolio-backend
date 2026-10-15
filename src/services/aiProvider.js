@@ -24,13 +24,14 @@ const parseJson = (text) => {
   }
 };
 
-function createOllamaProvider() {
+function createOllamaProvider(modelOverride) {
   return {
     name: "ollama",
+    model: modelOverride || process.env.OLLAMA_MODEL || "qwen2.5:3b",
     async generateText({ system, user, jsonSchema }) {
       try {
         const response = await ollama.chat({
-          model: process.env.OLLAMA_MODEL || "qwen2.5:3b",
+          model: modelOverride || process.env.OLLAMA_MODEL || "qwen2.5:3b",
           stream: false,
           messages: [
             { role: "system", content: system },
@@ -46,12 +47,13 @@ function createOllamaProvider() {
   };
 }
 
-function createGroqProvider() {
+function createGroqProvider(modelOverride) {
   return {
     name: "groq",
+    model: modelOverride || process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL,
     async generateText({ system, user, jsonSchema }) {
       if (!process.env.GROQ_API_KEY) throw new AIProviderError("GROQ_API_KEY is not configured.", { code: "AI_NOT_CONFIGURED" });
-      const model = process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
+      const model = modelOverride || process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
       const retries = Math.max(0, Math.min(Number(process.env.AI_RETRY_ATTEMPTS) || DEFAULT_RETRY_ATTEMPTS, 3));
       const maxOutputTokens = Math.max(256, Math.min(Number(process.env.AI_MAX_OUTPUT_TOKENS) || DEFAULT_MAX_OUTPUT_TOKENS, 1500));
 
@@ -104,12 +106,12 @@ function createGroqProvider() {
   };
 }
 
-export function createAIProvider() {
-  return (process.env.AI_PROVIDER || "ollama").toLowerCase() === "groq" ? createGroqProvider() : createOllamaProvider();
+export function createAIProvider({ model } = {}) {
+  return (process.env.AI_PROVIDER || "ollama").toLowerCase() === "groq" ? createGroqProvider(model) : createOllamaProvider(model);
 }
 
 export async function generateStructured(input, schema, transform = (value) => value) {
-  const provider = createAIProvider();
+  const provider = createAIProvider({ model: input.model });
   const text = await provider.generateText(input);
   return { provider: provider.name, result: schema.parse(transform(parseJson(text))) };
 }

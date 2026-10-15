@@ -15,6 +15,19 @@ const JobMatchSchema = new Schema(
     salaryCompatibility: { type: String, enum: ["compatible", "incompatible", "unknown"], default: "unknown" },
     provider: { type: String, required: true },
     scoringVersion: { type: String, required: true },
+    modelsUsed: { type: [String], default: [] },
+    agreement: { type: Number, min: 0, max: 1 },
+    modelResults: {
+      type: [{
+        model: String,
+        provider: String,
+        matchScore: Number,
+        recommendation: String,
+        matchingSkills: [String],
+        missingSkills: [String],
+      }],
+      default: [],
+    },
     evaluatedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }

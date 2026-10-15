@@ -3,6 +3,7 @@ import { z } from "zod";
 import Job from "../models/Job.js";
 import JobMatch from "../models/JobMatch.js";
 import Application from "../models/Application.js";
+import User from "../models/User.js";
 import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
@@ -31,17 +32,19 @@ async function filterRelevantCareerJobs(jobs, userId) {
 }
 
 async function getVisibleOpenJobs(userId, limit = 500) {
+  const user = await User.findById(userId).select("preferredLocations").lean();
+  const preferredLocations = user?.preferredLocations || [];
   const [jobs, submittedJobIds] = await Promise.all([
-    Job.find({ status: "open", ...allowedJobLocationFilter })
+    Job.find({ status: "open", ...(preferredLocations.length ? {} : allowedJobLocationFilter) })
       .sort({ postedAt: -1, createdAt: -1 })
-      .limit(limit)
+      .limit(Math.min(limit * 4, preferredLocations.length ? 500 : 100))
       .lean(),
     getSubmittedJobIds(userId),
   ]);
   const relevantJobs = await filterRelevantCareerJobs(jobs, userId);
   return deduplicateJobs(relevantJobs.filter((job) =>
     !submittedJobIds.has(job._id.toString())
-    && isAllowedJobLocation(job.location)
+    && isAllowedJobLocation(job.location, preferredLocations)
     && isValidJobSourceUrl(job.source, job.applicationUrl),
   ));
 }
@@ -135,16 +138,16 @@ const serializeJob = (job, match = null) => ({
 router.get("/", authenticate, async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
   const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
-  const filter = { status: "open", ...allowedJobLocationFilter };
+  const filter = { status: "open", ...(req.user.preferredLocations?.length ? {} : allowedJobLocationFilter) };
   if (search) filter.$text = { $search: search };
 
   try {
     const [jobs, submittedJobIds] = await Promise.all([
-      Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, 100)).lean(),
+      Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, req.user.preferredLocations?.length ? 500 : 100)).lean(),
       getSubmittedJobIds(req.user._id),
     ]);
     const visibleJobs = await filterRelevantCareerJobs(jobs, req.user._id);
-    return res.json({ success: true, jobs: deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
+    return res.json({ success: true, jobs: deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location, req.user.preferredLocations) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
@@ -173,7 +176,7 @@ router.get("/suggestions", authenticate, async (req, res) => {
       JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(80).populate("job").lean(),
       getSubmittedJobIds(req.user._id),
     ]);
-    const qualityMatches = matches.filter((item) => item.job?.status === "open" && !submittedJobIds.has(item.job._id.toString()) && isAllowedJobLocation(item.job.location) && isQualityJob(item.job) && item.matchScore >= MIN_CAREER_MATCH_SCORE && item.recommendation !== "skip");
+    const qualityMatches = matches.filter((item) => item.job?.status === "open" && !submittedJobIds.has(item.job._id.toString()) && isAllowedJobLocation(item.job.location, req.user.preferredLocations) && isQualityJob(item.job) && item.matchScore >= MIN_CAREER_MATCH_SCORE && item.recommendation !== "skip");
     const uniqueJobs = deduplicateJobs(qualityMatches.map((item) => item.job));
     const uniqueIds = new Set(uniqueJobs.map((job) => job._id.toString()));
     return res.json({ success: true, suggestions: qualityMatches.filter((item) => uniqueIds.has(item.job._id.toString())).slice(0, 20).map((item) => serializeJob(item.job, {
@@ -184,6 +187,9 @@ router.get("/suggestions", authenticate, async (req, res) => {
       reasons: item.reasons,
       concerns: item.concerns,
       salaryCompatibility: item.salaryCompatibility,
+      modelsUsed: item.modelsUsed,
+      agreement: item.agreement,
+      modelResults: item.modelResults,
     })) });
   } catch (error) {
     console.error("Job suggestions failed:", error.message);
@@ -201,7 +207,8 @@ router.post("/discover", authenticate, async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
 
-    const scoreResults = await scoreWithLimit(savedJobs.slice(0, 10), async (job) => {
+    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || 50, savedJobs.length);
+    const scoreResults = await scoreWithLimit(savedJobs.slice(0, scoreLimit), async (job) => {
       const result = await scoreJob(profile, job);
       await JobMatch.findOneAndUpdate(
         { user: req.user._id, job: job._id },
@@ -245,7 +252,8 @@ router.post("/discover-careers", authenticate, async (req, res) => {
       { $set: job, $setOnInsert: { createdBy: req.user._id } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
-    const scoreResults = await scoreWithLimit(savedJobs.slice(0, 20), async (job) => {
+    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || 50, savedJobs.length);
+    const scoreResults = await scoreWithLimit(savedJobs.slice(0, scoreLimit), async (job) => {
       const result = await scoreJob(profile, job);
       await JobMatch.findOneAndUpdate(
         { user: req.user._id, job: job._id },
@@ -287,7 +295,8 @@ router.post("/import", authenticate, async (req, res) => {
       { $set: { ...job, fetchedAt: new Date(), status: "open", sourceUrl: job.sourceUrl || job.applicationUrl }, $setOnInsert: { createdBy: req.user._id } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
-    const scores = await scoreWithLimit(savedJobs.slice(0, 10), async (job) => {
+    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || 50, savedJobs.length);
+    const scores = await scoreWithLimit(savedJobs.slice(0, scoreLimit), async (job) => {
       const result = await scoreJob(profile, job);
       await JobMatch.findOneAndUpdate({ user: req.user._id, job: job._id }, { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() }, { upsert: true, new: true, setDefaultsOnInsert: true });
     });
