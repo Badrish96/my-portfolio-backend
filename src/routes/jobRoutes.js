@@ -6,7 +6,7 @@ import Application from "../models/Application.js";
 import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
-import { discoverJobs, JobDiscoveryError } from "../services/jobDiscovery.js";
+import { discoverJobs, isAllowedJobLocation, JobDiscoveryError } from "../services/jobDiscovery.js";
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
@@ -99,8 +99,8 @@ router.get("/", authenticate, async (req, res) => {
   if (search) filter.$text = { $search: search };
 
   try {
-    const jobs = await Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(limit).lean();
-    return res.json({ success: true, jobs: jobs.map((job) => serializeJob(job)) });
+    const jobs = await Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, 100)).lean();
+    return res.json({ success: true, jobs: jobs.filter((job) => isAllowedJobLocation(job.location)).slice(0, limit).map((job) => serializeJob(job)) });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
@@ -125,8 +125,8 @@ router.get("/summary", authenticate, async (req, res) => {
 
 router.get("/suggestions", authenticate, async (req, res) => {
   try {
-    const matches = await JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(20).populate("job").lean();
-    return res.json({ success: true, suggestions: matches.filter((item) => item.job?.status === "open").map((item) => serializeJob(item.job, {
+    const matches = await JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(80).populate("job").lean();
+    return res.json({ success: true, suggestions: matches.filter((item) => item.job?.status === "open" && isAllowedJobLocation(item.job.location)).slice(0, 20).map((item) => serializeJob(item.job, {
       matchScore: item.matchScore,
       recommendation: item.recommendation,
       matchingSkills: item.matchingSkills,
