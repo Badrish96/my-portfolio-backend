@@ -50,7 +50,7 @@ const scoringInput = z.object({
 });
 
 const importedJobInput = z.object({
-  source: z.enum(["linkedin", "naukri"]),
+  source: z.enum(["linkedin", "naukri", "hirist", "indeed"]),
   externalId: z.string().trim().min(1).max(300),
   title: z.string().trim().min(2).max(200),
   company: z.string().trim().min(1).max(160),
