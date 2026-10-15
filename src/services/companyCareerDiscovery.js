@@ -78,8 +78,7 @@ function potentialProfileMatch(job, profile) {
   const titleMatchesSkill = skillTerms.some((term) => title.includes(term));
   const descriptionMatchesSkill = skillTerms.some((term) => descriptionSkills.includes(term) || normalizeJobText(job.description).includes(term));
   const clearlyUnrelated = /\b(program manager|project manager|product manager|account executive|sales|recruiter|accountant|legal|finance|human resources|talent partner|intern|trainee)\b/.test(title);
-  const relevantEngineeringTitle = /\b(frontend|front end|full stack|software engineer|software developer|web developer|application developer|ui engineer|react|javascript|typescript|node)\b/.test(title);
-  return !clearlyUnrelated && (titleMatchesRole || titleMatchesSkill || descriptionMatchesSkill || relevantEngineeringTitle);
+  return !clearlyUnrelated && (titleMatchesRole || titleMatchesSkill || descriptionMatchesSkill);
 }
 
 function normalizeJob(company, raw, fields) {

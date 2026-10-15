@@ -27,7 +27,7 @@ async function filterRelevantCareerJobs(jobs, userId) {
   return jobs.filter((job) => {
     if (job.source !== "company-career") return true;
     const match = matchByJobId.get(job._id.toString());
-    return Boolean(match);
+    return Boolean(match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip");
   });
 }
 
