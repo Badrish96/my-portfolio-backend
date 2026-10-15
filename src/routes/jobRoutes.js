@@ -6,7 +6,7 @@ import Application from "../models/Application.js";
 import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
-import { allowedJobLocationFilter, discoverJobs, isAllowedJobLocation, JobDiscoveryError } from "../services/jobDiscovery.js";
+import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isQualityJob, JobDiscoveryError } from "../services/jobDiscovery.js";
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
@@ -100,7 +100,7 @@ router.get("/", authenticate, async (req, res) => {
 
   try {
     const jobs = await Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, 100)).lean();
-    return res.json({ success: true, jobs: jobs.filter((job) => isAllowedJobLocation(job.location)).slice(0, limit).map((job) => serializeJob(job)) });
+    return res.json({ success: true, jobs: deduplicateJobs(jobs.filter((job) => isAllowedJobLocation(job.location))).slice(0, limit).map((job) => serializeJob(job)) });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
@@ -110,7 +110,7 @@ router.get("/", authenticate, async (req, res) => {
 router.get("/summary", authenticate, async (req, res) => {
   try {
     const [jobsDiscovered, applications, shortlisted, interviews, readyForReview] = await Promise.all([
-      Job.countDocuments({ status: "open", ...allowedJobLocationFilter }),
+      Job.countDocuments({ status: "open", ...allowedJobLocationFilter, company: { $not: /dataannotation/i } }),
       Application.countDocuments({ user: req.user._id }),
       Application.countDocuments({ user: req.user._id, status: "shortlisted" }),
       Application.countDocuments({ user: req.user._id, status: "interview" }),
@@ -126,7 +126,10 @@ router.get("/summary", authenticate, async (req, res) => {
 router.get("/suggestions", authenticate, async (req, res) => {
   try {
     const matches = await JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(80).populate("job").lean();
-    return res.json({ success: true, suggestions: matches.filter((item) => item.job?.status === "open" && isAllowedJobLocation(item.job.location)).slice(0, 20).map((item) => serializeJob(item.job, {
+    const qualityMatches = matches.filter((item) => item.job?.status === "open" && isAllowedJobLocation(item.job.location) && isQualityJob(item.job));
+    const uniqueJobs = deduplicateJobs(qualityMatches.map((item) => item.job));
+    const uniqueIds = new Set(uniqueJobs.map((job) => job._id.toString()));
+    return res.json({ success: true, suggestions: qualityMatches.filter((item) => uniqueIds.has(item.job._id.toString())).slice(0, 20).map((item) => serializeJob(item.job, {
       matchScore: item.matchScore,
       recommendation: item.recommendation,
       matchingSkills: item.matchingSkills,
@@ -189,7 +192,7 @@ router.post("/discover", authenticate, async (req, res) => {
 router.post("/import", authenticate, async (req, res) => {
   const jobs = Array.isArray(req.body?.jobs) ? req.body.jobs.slice(0, 50) : [];
   if (!jobs.length) return res.status(400).json({ success: false, message: "At least one job is required." });
-  const parsedJobs = jobs.map((job) => importedJobInput.safeParse(job)).filter((result) => result.success).map((result) => result.data);
+  const parsedJobs = jobs.map((job) => importedJobInput.safeParse(job)).filter((result) => result.success).map((result) => result.data).filter(isQualityJob);
   if (!parsedJobs.length) return res.status(400).json({ success: false, message: "No valid LinkedIn or Naukri jobs were supplied." });
 
   try {

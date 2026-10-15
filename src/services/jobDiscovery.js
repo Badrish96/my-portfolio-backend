@@ -1,6 +1,7 @@
 const ADZUNA_BASE_URL = "https://api.adzuna.com/v1/api/jobs";
 
 export const DEFAULT_JOB_LOCATIONS = ["Gurugram", "Bangalore", "Noida", "Delhi NCR"];
+const EXCLUDED_COMPANIES = new Set(["dataannotation"]);
 export const allowedJobLocationFilter = {
   $or: [
     { location: /\b(gurugram|gurgaon)\b/i },
@@ -41,6 +42,46 @@ export function isAllowedJobLocation(location) {
     || /\b(bangalore|bengaluru)\b/.test(normalized)
     || /\b(?:greater\s+)?noida\b/.test(normalized)
     || /\b(?:new\s+)?delhi(?:\s+ncr)?\b/.test(normalized);
+}
+
+export function normalizeJobText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export function isExcludedJobCompany(company) {
+  return EXCLUDED_COMPANIES.has(normalizeJobText(company).replace(/\s+/g, ""));
+}
+
+export function isQualityJob(job) {
+  const title = normalizeJobText(job.title);
+  const company = normalizeJobText(job.company);
+  const description = normalizeJobText(job.description);
+  if (!title || title === "untitled job" || title === "job") return false;
+  if (!company || company === "unknown" || company === "unknown company") return false;
+  if (isExcludedJobCompany(job.company)) return false;
+  if (description.startsWith("review the original") && description.includes("listing")) return false;
+  return description.length >= 20;
+}
+
+export function jobRoleKey(job) {
+  const seniorityRemoved = normalizeJobText(job.title)
+    .replace(/\b(senior|sr|junior|jr|lead|principal|staff|associate|intern|trainee|i|ii|iii|iv|1|2|3|4)\b/g, " ");
+  return `${normalizeJobText(job.company).replace(/\s+/g, "")}::${seniorityRemoved.replace(/\s+/g, " ").trim()}`;
+}
+
+export function deduplicateJobs(jobs) {
+  const seen = new Set();
+  return jobs.filter((job) => {
+    if (!isQualityJob(job)) return false;
+    const key = jobRoleKey(job);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function searchLocation({ appId, appKey, country, query, location, resultsPerPage }) {
@@ -100,11 +141,12 @@ export async function discoverJobs(profile) {
     };
   }).filter((job) => {
     const key = job.externalId || job.applicationUrl;
-    if (!job.applicationUrl || !job.title || !job.company || !isAllowedJobLocation(job.location) || seen.has(key)) return false;
+    if (!job.applicationUrl || !job.title || !job.company || !isAllowedJobLocation(job.location) || seen.has(key) || !isQualityJob(job)) return false;
     seen.add(key);
     return true;
-  }).slice(0, requestedResults);
+  });
+  const deduplicatedJobs = deduplicateJobs(jobs).slice(0, requestedResults);
 
-  console.log("Adzuna discovery response:", { country, query, locations, rawResults: rawJobs.length, allowedResults: jobs.length });
-  return { jobs, rawCount: rawJobs.length, skippedCount: rawJobs.length - jobs.length, country, query, locations };
+  console.log("Adzuna discovery response:", { country, query, locations, rawResults: rawJobs.length, allowedResults: deduplicatedJobs.length });
+  return { jobs: deduplicatedJobs, rawCount: rawJobs.length, skippedCount: rawJobs.length - deduplicatedJobs.length, country, query, locations };
 }
