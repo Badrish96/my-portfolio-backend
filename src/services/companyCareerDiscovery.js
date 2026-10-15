@@ -1,6 +1,11 @@
 import { deduplicateJobs, isAllowedJobLocation, isQualityJob, normalizeJobText } from "./jobDiscovery.js";
 
 const DEFAULT_LIMIT = 100;
+const CAREER_PAGE_HEADERS = {
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-IN,en;q=0.9",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+};
 
 function configuredCompanies() {
   const raw = String(process.env.COMPANY_CAREER_SOURCES || "[]");
@@ -94,7 +99,7 @@ function normalizeJob(company, raw, fields) {
 }
 
 async function getJson(url) {
-  const response = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  const response = await fetch(url, { headers: { ...CAREER_PAGE_HEADERS, Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`Career source returned HTTP ${response.status}.`);
   return response.json();
 }
@@ -146,7 +151,7 @@ function linkedAtsSource(company, html) {
 }
 
 async function jsonLdJobs(company) {
-  const response = await fetch(company.careersUrl, { signal: AbortSignal.timeout(20_000) });
+  const response = await fetch(company.careersUrl, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`Career page returned HTTP ${response.status}.`);
   const html = await response.text();
   const scripts = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
@@ -215,6 +220,9 @@ export async function discoverCompanyCareerJobs(profile) {
     status: result.status,
     jobs: result.status === "fulfilled" ? result.value.length : 0,
     error: result.status === "rejected" ? result.reason?.message || "Unknown source error" : undefined,
+    reason: result.status === "fulfilled" && result.value.length === 0
+      ? "No machine-readable JobPosting entries or supported ATS feed were exposed by this career page."
+      : undefined,
   }));
   return { jobs: balanceCompanies(deduplicateJobs(jobs), limit), companies: companies.length, failures, sourceDetails };
 }

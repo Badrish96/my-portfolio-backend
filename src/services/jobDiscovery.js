@@ -5,7 +5,7 @@ const EXCLUDED_COMPANIES = new Set(["dataannotation"]);
 export const allowedJobLocationFilter = {
   $or: [
     { location: /\b(gurugram|gurgaon)\b/i },
-    { location: /\b(bangalore|bengaluru)\b/i },
+    { location: /\b(bangalore|bengaluru|banglore)\b/i },
     { location: /\b(?:greater\s+)?noida\b/i },
     { location: /\b(?:new\s+)?delhi(?:\s+ncr)?\b/i },
   ],
@@ -39,7 +39,7 @@ function allowedLocations() {
 export function isAllowedJobLocation(location) {
   const normalized = String(location || "").toLowerCase();
   return /\b(gurugram|gurgaon)\b/.test(normalized)
-    || /\b(bangalore|bengaluru)\b/.test(normalized)
+    || /\b(bangalore|bengaluru|banglore)\b/.test(normalized)
     || /\b(?:greater\s+)?noida\b/.test(normalized)
     || /\b(?:new\s+)?delhi(?:\s+ncr)?\b/.test(normalized);
 }
