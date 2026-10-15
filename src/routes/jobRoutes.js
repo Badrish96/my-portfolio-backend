@@ -287,7 +287,7 @@ router.post("/import", authenticate, async (req, res) => {
   const jobs = Array.isArray(req.body?.jobs) ? req.body.jobs.slice(0, 50) : [];
   if (!jobs.length) return res.status(400).json({ success: false, message: "At least one job is required." });
   const parsedJobs = jobs.map((job) => importedJobInput.safeParse(job)).filter((result) => result.success).map((result) => result.data).filter((job) => isQualityJob(job) && isValidJobSourceUrl(job.source, job.applicationUrl));
-  if (!parsedJobs.length) return res.status(400).json({ success: false, message: "No valid LinkedIn or Naukri jobs were supplied." });
+  if (!parsedJobs.length) return res.status(400).json({ success: false, message: "No valid jobs were supplied from the current page. Supported sources: LinkedIn, Naukri, Hirist, Indeed, Adzuna, and generic career pages." });
 
   try {
     const profile = getCandidateProfile(req.user);

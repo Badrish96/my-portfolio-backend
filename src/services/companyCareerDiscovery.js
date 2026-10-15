@@ -170,12 +170,14 @@ async function smartRecruitersJobs(company) {
 }
 
 function linkedAtsSource(company, html) {
-  const greenhouse = html.match(/https?:\/\/boards\.greenhouse\.io\/([^/?#"'\\]+)/i)?.[1];
-  if (greenhouse) return { ...company, ats: "greenhouse", board: greenhouse, careersUrl: `https://boards.greenhouse.io/${greenhouse}` };
+  const greenhouse = html.match(/https?:\/\/(?:boards|job-boards)\.greenhouse\.io\/([^/?#"'\\]+)/i)?.[1];
+  if (greenhouse) return { ...company, ats: "greenhouse", board: greenhouse, careersUrl: `https://job-boards.greenhouse.io/${greenhouse}` };
   const lever = html.match(/https?:\/\/jobs\.lever\.co\/([^/?#"'\\]+)/i)?.[1];
   if (lever) return { ...company, ats: "lever", board: lever, careersUrl: `https://jobs.lever.co/${lever}` };
   const ashby = html.match(/https?:\/\/jobs\.ashbyhq\.com\/([^/?#"'\\]+)/i)?.[1];
   if (ashby) return { ...company, ats: "ashby", board: ashby, careersUrl: `https://jobs.ashbyhq.com/${ashby}` };
+  const smartRecruiters = html.match(/https?:\/\/jobs\.smartrecruiters\.com\/([^/?#"'\\]+)/i)?.[1];
+  if (smartRecruiters) return { ...company, ats: "smartrecruiters", board: smartRecruiters, careersUrl: `https://jobs.smartrecruiters.com/${smartRecruiters}` };
   return null;
 }
 
@@ -242,17 +244,30 @@ export async function discoverCompanyCareerJobs(profile) {
   const companies = configuredCompanies();
   const limit = Math.min(Math.max(Number(process.env.COMPANY_CAREER_JOB_LIMIT) || DEFAULT_LIMIT, 1), 500);
   const results = await Promise.allSettled(companies.map(fetchCompanyJobs));
-  const jobs = results.flatMap((result) => result.status === "fulfilled" ? result.value : [])
-    .filter((job) => isAllowedJobLocation(job.location, profile.preferredLocations) && isQualityJob(job) && potentialProfileMatch(job, profile));
+  const companyResults = results.map((result, index) => {
+    const fetchedJobs = result.status === "fulfilled" ? result.value : [];
+    const acceptedJobs = fetchedJobs.filter((job) => isAllowedJobLocation(job.location, profile.preferredLocations) && isQualityJob(job) && potentialProfileMatch(job, profile));
+    return { company: companies[index], result, fetchedJobs, acceptedJobs };
+  });
+  const jobs = companyResults.flatMap(({ acceptedJobs }) => acceptedJobs);
   const failures = results.filter((result) => result.status === "rejected").length;
-  const sourceDetails = results.map((result, index) => ({
-    company: companies[index].company,
+  const balancedJobs = balanceCompanies(deduplicateJobs(jobs), limit);
+  const returnedIds = new Set(balancedJobs.map((job) => `${job.company}::${job.externalId}`));
+  const sourceDetails = companyResults.map(({ company, result, fetchedJobs, acceptedJobs }) => ({
+    company: company.company,
     status: result.status,
-    jobs: result.status === "fulfilled" ? result.value.length : 0,
+    fetched: fetchedJobs.length,
+    jobs: acceptedJobs.length,
+    returned: acceptedJobs.filter((job) => returnedIds.has(`${job.company}::${job.externalId}`)).length,
+    filtered: Math.max(0, fetchedJobs.length - acceptedJobs.length),
     error: result.status === "rejected" ? result.reason?.message || "Unknown source error" : undefined,
-    reason: result.status === "fulfilled" && result.value.length === 0
-      ? "No machine-readable JobPosting entries or supported ATS feed were exposed by this career page."
+    reason: result.status === "rejected"
+      ? "The configured career source failed."
+      : fetchedJobs.length === 0
+        ? "No machine-readable JobPosting entries or supported ATS feed were exposed by this career page."
+        : acceptedJobs.length === 0
+          ? "Fetched jobs were excluded by preferred location, quality, or profile matching filters."
       : undefined,
   }));
-  return { jobs: balanceCompanies(deduplicateJobs(jobs), limit), companies: companies.length, failures, sourceDetails };
+  return { jobs: balancedJobs, companies: companies.length, failures, sourceDetails };
 }

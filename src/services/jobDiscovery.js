@@ -35,8 +35,8 @@ function buildSearchQueries(profile) {
   const roles = Array.isArray(profile.preferredRoles) ? profile.preferredRoles : [];
   const skills = Array.isArray(profile.verifiedSkills) ? profile.verifiedSkills.slice(0, 5) : [];
   const queries = roles.flatMap((role) => [
-    [role, ...skills.slice(0, 2)],
-    [role, skills[2], skills[3]],
+    [role],
+    [role, skills[0]],
   ]).map((parts) => parts.filter(Boolean).join(" ").trim()).filter(Boolean);
   if (!queries.length && skills.length) queries.push(skills.slice(0, 3).join(" "));
   if (!queries.length) throw new JobDiscoveryError("Add preferred roles or skills to your profile before discovering jobs.", "PROFILE_SEARCH_DATA_REQUIRED");
@@ -79,7 +79,7 @@ export function isValidJobSourceUrl(source, applicationUrl) {
   try {
     const url = new URL(applicationUrl);
     const hostname = url.hostname.toLowerCase();
-    if (source === "naukri") return /(?:^|\.)naukri\.com$/.test(hostname) && /^\/job-listings(?:[-/]|$)/i.test(url.pathname);
+    if (source === "naukri") return /(?:^|\.)naukri\.com$/.test(hostname) && /^\/(?:job-listings|jobs?)(?:[-/]|$)/i.test(url.pathname);
     if (source === "linkedin") return /(?:^|\.)linkedin\.com$/.test(hostname) && /\/jobs\//i.test(url.pathname);
     if (source === "hirist") return /(?:^|\.)hirist\.tech$/.test(hostname);
     if (source === "indeed") return /(?:^|\.)indeed\.[a-z.]+$/.test(hostname) && /(?:viewjob|jobs|clk)/i.test(url.pathname);
