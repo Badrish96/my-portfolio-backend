@@ -30,6 +30,22 @@ async function filterRelevantCareerJobs(jobs, userId) {
   });
 }
 
+async function getVisibleOpenJobs(userId, limit = 500) {
+  const [jobs, submittedJobIds] = await Promise.all([
+    Job.find({ status: "open", ...allowedJobLocationFilter })
+      .sort({ postedAt: -1, createdAt: -1 })
+      .limit(limit)
+      .lean(),
+    getSubmittedJobIds(userId),
+  ]);
+  const relevantJobs = await filterRelevantCareerJobs(jobs, userId);
+  return deduplicateJobs(relevantJobs.filter((job) =>
+    !submittedJobIds.has(job._id.toString())
+    && isAllowedJobLocation(job.location)
+    && isValidJobSourceUrl(job.source, job.applicationUrl),
+  ));
+}
+
 async function getSubmittedJobIds(userId) {
   const applications = await Application.find({ user: userId, status: "submitted" }).select("job").lean();
   return new Set(applications.map((application) => application.job?.toString()).filter(Boolean));
@@ -137,14 +153,14 @@ router.get("/", authenticate, async (req, res) => {
 
 router.get("/summary", authenticate, async (req, res) => {
   try {
-    const [jobsDiscovered, applications, shortlisted, interviews, readyForReview] = await Promise.all([
-      Job.countDocuments({ status: "open", ...allowedJobLocationFilter, company: { $not: /dataannotation/i } }),
+    const [visibleJobs, applications, shortlisted, interviews, readyForReview] = await Promise.all([
+      getVisibleOpenJobs(req.user._id),
       Application.countDocuments({ user: req.user._id }),
       Application.countDocuments({ user: req.user._id, status: "shortlisted" }),
       Application.countDocuments({ user: req.user._id, status: "interview" }),
       Application.countDocuments({ user: req.user._id, status: "ready_for_review" }),
     ]);
-    return res.json({ success: true, summary: { jobsDiscovered, applications, shortlisted, interviews, readyForReview } });
+    return res.json({ success: true, summary: { jobsDiscovered: visibleJobs.length, applications, shortlisted, interviews, readyForReview } });
   } catch (error) {
     console.error("Job summary failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load dashboard summary." });
@@ -238,9 +254,13 @@ router.post("/discover-careers", authenticate, async (req, res) => {
       );
       return result;
     });
+    const visibleJobs = await getVisibleOpenJobs(req.user._id);
+    const visibleJobIds = new Set(visibleJobs.map((job) => job._id.toString()));
+    const visibleDiscovered = savedJobs.filter((job) => visibleJobIds.has(job._id.toString())).length;
     return res.json({
       success: true,
       discovered: savedJobs.length,
+      visibleDiscovered,
       companies: discovery.companies,
       sourceFailures: discovery.failures,
       sourceDetails: discovery.sourceDetails,
