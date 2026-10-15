@@ -11,6 +11,11 @@ import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLo
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
 
+async function getSubmittedJobIds(userId) {
+  const applications = await Application.find({ user: userId, status: "submitted" }).select("job").lean();
+  return new Set(applications.map((application) => application.job?.toString()).filter(Boolean));
+}
+
 async function scoreWithLimit(items, worker) {
   const results = [];
   let cursor = 0;
@@ -99,8 +104,11 @@ router.get("/", authenticate, async (req, res) => {
   if (search) filter.$text = { $search: search };
 
   try {
-    const jobs = await Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, 100)).lean();
-    return res.json({ success: true, jobs: deduplicateJobs(jobs.filter((job) => isAllowedJobLocation(job.location) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
+    const [jobs, submittedJobIds] = await Promise.all([
+      Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, 100)).lean(),
+      getSubmittedJobIds(req.user._id),
+    ]);
+    return res.json({ success: true, jobs: deduplicateJobs(jobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
@@ -125,8 +133,11 @@ router.get("/summary", authenticate, async (req, res) => {
 
 router.get("/suggestions", authenticate, async (req, res) => {
   try {
-    const matches = await JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(80).populate("job").lean();
-    const qualityMatches = matches.filter((item) => item.job?.status === "open" && isAllowedJobLocation(item.job.location) && isQualityJob(item.job));
+    const [matches, submittedJobIds] = await Promise.all([
+      JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(80).populate("job").lean(),
+      getSubmittedJobIds(req.user._id),
+    ]);
+    const qualityMatches = matches.filter((item) => item.job?.status === "open" && !submittedJobIds.has(item.job._id.toString()) && isAllowedJobLocation(item.job.location) && isQualityJob(item.job));
     const uniqueJobs = deduplicateJobs(qualityMatches.map((item) => item.job));
     const uniqueIds = new Set(uniqueJobs.map((job) => job._id.toString()));
     return res.json({ success: true, suggestions: qualityMatches.filter((item) => uniqueIds.has(item.job._id.toString())).slice(0, 20).map((item) => serializeJob(item.job, {
