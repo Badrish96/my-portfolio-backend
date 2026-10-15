@@ -7,6 +7,7 @@ import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
 import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
+import { discoverCompanyCareerJobs } from "../services/companyCareerDiscovery.js";
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
@@ -197,6 +198,39 @@ router.post("/discover", authenticate, async (req, res) => {
     const status = error instanceof JobDiscoveryError && error.code === "JOB_SOURCE_NOT_CONFIGURED" ? 503 : error.code === "PROFILE_SEARCH_DATA_REQUIRED" ? 400 : 502;
     console.error("Job discovery failed:", error.message);
     return res.status(status).json({ success: false, message: error.message || "Unable to discover jobs." });
+  }
+});
+
+router.post("/discover-careers", authenticate, async (req, res) => {
+  try {
+    const profile = getCandidateProfile(req.user);
+    const discovery = await discoverCompanyCareerJobs(profile);
+    const savedJobs = await Promise.all(discovery.jobs.map((job) => Job.findOneAndUpdate(
+      { source: job.source, externalId: job.externalId },
+      { $set: job, $setOnInsert: { createdBy: req.user._id } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean()));
+    const scoreResults = await scoreWithLimit(savedJobs.slice(0, 20), async (job) => {
+      const result = await scoreJob(profile, job);
+      await JobMatch.findOneAndUpdate(
+        { user: req.user._id, job: job._id },
+        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      return result;
+    });
+    return res.json({
+      success: true,
+      discovered: savedJobs.length,
+      companies: discovery.companies,
+      sourceFailures: discovery.failures,
+      aiScored: scoreResults.filter((result) => result.status === "fulfilled").length,
+      aiFailures: scoreResults.filter((result) => result.status === "rejected").length,
+      message: savedJobs.length ? "Company career jobs discovered and scored successfully." : "No matching company career jobs were found. Add ATS or career-page sources to COMPANY_CAREER_SOURCES.",
+    });
+  } catch (error) {
+    console.error("Company career discovery failed:", error.message);
+    return res.status(502).json({ success: false, message: error.message || "Unable to discover company career jobs." });
   }
 });
 

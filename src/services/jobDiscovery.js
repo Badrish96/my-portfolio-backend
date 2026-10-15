@@ -76,6 +76,7 @@ export function isQualityJob(job) {
   const description = normalizeJobText(job.description);
   if (!title || title === "untitled job" || title === "job") return false;
   if (!company || company === "unknown" || company === "unknown company") return false;
+  if (!job.applicationUrl) return false;
   if (isExcludedJobCompany(job.company)) return false;
   if (job.source && !isValidJobSourceUrl(job.source, job.applicationUrl)) return false;
   if (description.startsWith("review the original") && description.includes("listing")) return false;
