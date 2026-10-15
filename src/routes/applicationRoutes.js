@@ -43,13 +43,22 @@ router.post("/mark-submitted", authenticate, async (req, res) => {
 
   try {
     const candidates = [applicationUrl];
-    const jobIdMatch = parsedUrl.pathname.match(/(?:jobs\/view|job-detail|job-detail-)([0-9]+)/i);
-    if (jobIdMatch) candidates.push(new RegExp(`/${jobIdMatch[1]}(?:[/?]|$)`));
+    const jobIdMatch = parsedUrl.pathname.match(/(?:jobs\/view\/|job-detail[-/])([0-9]+)/i);
+    const jobId = jobIdMatch?.[1] || "";
+    // LinkedIn appends tracking/query parameters and some boards use a full URL
+    // as externalId. Match the stable board job ID across every stored URL form.
+    const jobIdPattern = jobId
+      ? new RegExp(`(?:jobs\\/view\\/|job-detail[-\\/])${jobId}(?:[/?#]|$)`, "i")
+      : null;
 
     const job = await Job.findOne({ $or: [
       { applicationUrl: { $in: candidates.filter((candidate) => typeof candidate === "string") } },
       { sourceUrl: { $in: candidates.filter((candidate) => typeof candidate === "string") } },
-      ...(jobIdMatch ? [{ externalId: jobIdMatch[1] }, { applicationUrl: candidates[1] }, { sourceUrl: candidates[1] }] : []),
+      ...(jobIdPattern ? [
+        { externalId: { $regex: jobIdPattern } },
+        { applicationUrl: { $regex: jobIdPattern } },
+        { sourceUrl: { $regex: jobIdPattern } },
+      ] : []),
     ] }).lean();
     if (!job) return res.status(404).json({ success: false, message: "This job is not in your imported jobs yet. Scan the job-board page first." });
 
