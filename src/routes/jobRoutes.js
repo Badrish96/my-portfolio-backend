@@ -7,10 +7,25 @@ import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
 import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
-import { discoverCompanyCareerJobs } from "../services/companyCareerDiscovery.js";
+import { discoverCompanyCareerJobs, stripHtml } from "../services/companyCareerDiscovery.js";
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
+const MIN_CAREER_MATCH_SCORE = 55;
+
+async function filterRelevantCareerJobs(jobs, userId) {
+  const careerJobIds = jobs.filter((job) => job.source === "company-career").map((job) => job._id);
+  if (!careerJobIds.length) return jobs;
+  const matches = await JobMatch.find({ user: userId, job: { $in: careerJobIds } })
+    .select("job matchScore recommendation")
+    .lean();
+  const matchByJobId = new Map(matches.map((match) => [match.job.toString(), match]));
+  return jobs.filter((job) => {
+    if (job.source !== "company-career") return true;
+    const match = matchByJobId.get(job._id.toString());
+    return Boolean(match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip");
+  });
+}
 
 async function getSubmittedJobIds(userId) {
   const applications = await Application.find({ user: userId, status: "submitted" }).select("job").lean();
@@ -86,7 +101,7 @@ const serializeJob = (job, match = null) => ({
   company: job.company,
   location: job.location || "",
   employmentType: job.employmentType || "",
-  description: job.description,
+  description: stripHtml(job.description),
   requiredSkills: job.requiredSkills,
   salaryMin: job.salaryMin,
   salaryMax: job.salaryMax,
@@ -109,7 +124,8 @@ router.get("/", authenticate, async (req, res) => {
       Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, 100)).lean(),
       getSubmittedJobIds(req.user._id),
     ]);
-    return res.json({ success: true, jobs: deduplicateJobs(jobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
+    const visibleJobs = await filterRelevantCareerJobs(jobs, req.user._id);
+    return res.json({ success: true, jobs: deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
@@ -138,7 +154,7 @@ router.get("/suggestions", authenticate, async (req, res) => {
       JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(80).populate("job").lean(),
       getSubmittedJobIds(req.user._id),
     ]);
-    const qualityMatches = matches.filter((item) => item.job?.status === "open" && !submittedJobIds.has(item.job._id.toString()) && isAllowedJobLocation(item.job.location) && isQualityJob(item.job));
+    const qualityMatches = matches.filter((item) => item.job?.status === "open" && !submittedJobIds.has(item.job._id.toString()) && isAllowedJobLocation(item.job.location) && isQualityJob(item.job) && item.matchScore >= MIN_CAREER_MATCH_SCORE && item.recommendation !== "skip");
     const uniqueJobs = deduplicateJobs(qualityMatches.map((item) => item.job));
     const uniqueIds = new Set(uniqueJobs.map((job) => job._id.toString()));
     return res.json({ success: true, suggestions: qualityMatches.filter((item) => uniqueIds.has(item.job._id.toString())).slice(0, 20).map((item) => serializeJob(item.job, {

@@ -13,8 +13,34 @@ function configuredCompanies() {
   }
 }
 
-function stripHtml(value) {
-  return String(value || "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim();
+function decodeHtmlEntities(value) {
+  const named = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+    nbsp: " ",
+  };
+  return String(value || "").replace(/&(#x?[0-9a-f]+|amp|lt|gt|quot|apos|nbsp);/gi, (full, entity) => {
+    const key = entity.toLowerCase();
+    if (named[key]) return named[key];
+    if (key.startsWith("#x")) return String.fromCodePoint(Number.parseInt(key.slice(2), 16));
+    if (key.startsWith("#")) return String.fromCodePoint(Number.parseInt(key.slice(1), 10));
+    return full;
+  });
+}
+
+export function stripHtml(value) {
+  let text = String(value || "");
+  // Some ATS feeds encode the complete HTML fragment, occasionally twice.
+  for (let pass = 0; pass < 2; pass += 1) text = decodeHtmlEntities(text);
+  return text
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function absoluteUrl(value, baseUrl) {
@@ -32,12 +58,18 @@ function locationText(value) {
 }
 
 function potentialProfileMatch(job, profile) {
-  const terms = [...(profile.preferredRoles || []), ...(profile.verifiedSkills || [])]
+  const roleTerms = (profile.preferredRoles || [])
     .map(normalizeJobText)
     .filter((term) => term.length >= 3);
-  if (!terms.length) return true;
+  const skillTerms = (profile.verifiedSkills || [])
+    .map(normalizeJobText)
+    .filter((term) => term.length >= 3);
+  if (!roleTerms.length && !skillTerms.length) return true;
+  const title = normalizeJobText(job.title);
   const text = normalizeJobText(`${job.title} ${job.description}`);
-  return terms.some((term) => text.includes(term));
+  const titleMatchesRole = roleTerms.some((term) => title.includes(term));
+  const matchingSkills = skillTerms.filter((term) => text.includes(term)).length;
+  return titleMatchesRole || matchingSkills >= 2;
 }
 
 function normalizeJob(company, raw, fields) {
@@ -153,6 +185,25 @@ async function fetchCompanyJobs(company) {
   return jsonLdJobs(company);
 }
 
+function balanceCompanies(jobs, limit) {
+  const groups = new Map();
+  for (const job of jobs) {
+    const key = normalizeJobText(job.company) || "unknown";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(job);
+  }
+  const balanced = [];
+  while (balanced.length < limit && groups.size) {
+    for (const [key, companyJobs] of groups) {
+      const next = companyJobs.shift();
+      if (next) balanced.push(next);
+      if (!companyJobs.length) groups.delete(key);
+      if (balanced.length >= limit) break;
+    }
+  }
+  return balanced;
+}
+
 export async function discoverCompanyCareerJobs(profile) {
   const companies = configuredCompanies();
   const limit = Math.min(Math.max(Number(process.env.COMPANY_CAREER_JOB_LIMIT) || DEFAULT_LIMIT, 1), 500);
@@ -166,5 +217,5 @@ export async function discoverCompanyCareerJobs(profile) {
     jobs: result.status === "fulfilled" ? result.value.length : 0,
     error: result.status === "rejected" ? result.reason?.message || "Unknown source error" : undefined,
   }));
-  return { jobs: deduplicateJobs(jobs).slice(0, limit), companies: companies.length, failures, sourceDetails };
+  return { jobs: balanceCompanies(deduplicateJobs(jobs), limit), companies: companies.length, failures, sourceDetails };
 }
