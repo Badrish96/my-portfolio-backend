@@ -58,7 +58,7 @@ function absoluteUrl(value, baseUrl) {
 
 function locationText(value) {
   if (Array.isArray(value)) return value.map(locationText).filter(Boolean).join(", ");
-  if (typeof value === "object" && value) return [value.city, value.addressLocality, value.name, value.label, value.address].map(locationText).filter(Boolean).join(", ");
+  if (typeof value === "object" && value) return [value.city, value.addressLocality, value.region, value.country, value.name, value.label, value.address].map(locationText).filter(Boolean).join(", ");
   return String(value || "").trim();
 }
 
@@ -73,7 +73,9 @@ function potentialProfileMatch(job, profile) {
   const title = normalizeJobText(job.title);
   const titleMatchesRole = roleTerms.some((term) => title.includes(term));
   const titleMatchesSkill = skillTerms.some((term) => title.includes(term));
-  return titleMatchesRole || titleMatchesSkill;
+  const clearlyUnrelated = /\b(program manager|project manager|product manager|account executive|sales|recruiter|accountant|legal|finance|human resources|talent partner|intern|trainee)\b/.test(title);
+  const relevantEngineeringTitle = /\b(frontend|front end|full stack|software engineer|software developer|web developer|application developer|ui engineer|react|javascript|typescript|node)\b/.test(title);
+  return !clearlyUnrelated && (titleMatchesRole || titleMatchesSkill || relevantEngineeringTitle);
 }
 
 function normalizeJob(company, raw, fields) {
@@ -140,6 +142,26 @@ async function ashbyJobs(company) {
   }));
 }
 
+async function smartRecruitersJobs(company) {
+  const params = new URLSearchParams({ limit: "100", offset: "0", country: "in" });
+  const payload = await getJson(`https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(company.board)}/postings?${params}`);
+  const postings = Array.isArray(payload.content) ? payload.content : [];
+  const detailed = await Promise.allSettled(postings.map(async (posting) => {
+    const details = posting.ref ? await getJson(posting.ref) : posting;
+    const sections = details.jobAd?.sections || {};
+    const sectionText = Object.values(sections).map((section) => section?.text || section?.content || "").join(" ");
+    return normalizeJob(company, posting, {
+      externalId: posting.id || details.id,
+      title: details.name || posting.name,
+      location: details.location || posting.location,
+      description: sectionText || details.description || `${details.name || posting.name} at ${company.company}.`,
+      applicationUrl: details.applyUrl || posting.applyUrl || `https://jobs.smartrecruiters.com/${company.board}/${posting.id}`,
+      postedAt: details.releasedDate || posting.releasedDate,
+    });
+  }));
+  return detailed.filter((result) => result.status === "fulfilled").map((result) => result.value);
+}
+
 function linkedAtsSource(company, html) {
   const greenhouse = html.match(/https?:\/\/boards\.greenhouse\.io\/([^/?#"'\\]+)/i)?.[1];
   if (greenhouse) return { ...company, ats: "greenhouse", board: greenhouse, careersUrl: `https://boards.greenhouse.io/${greenhouse}` };
@@ -186,6 +208,7 @@ async function fetchCompanyJobs(company) {
   if (company.ats === "greenhouse") return greenhouseJobs(company);
   if (company.ats === "lever") return leverJobs(company);
   if (company.ats === "ashby") return ashbyJobs(company);
+  if (company.ats === "smartrecruiters") return smartRecruitersJobs(company);
   return jsonLdJobs(company);
 }
 
