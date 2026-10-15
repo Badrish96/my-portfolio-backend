@@ -129,7 +129,6 @@ async function searchLocation({ appId, appKey, country, query, location, results
     what: query,
     where: location,
     sort_by: "date",
-    sort_dir: "down",
     "content-type": "application/json",
   });
 
@@ -139,9 +138,17 @@ async function searchLocation({ appId, appKey, country, query, location, results
   } catch {
     throw new JobDiscoveryError("The job source could not be reached.", "JOB_SOURCE_UNAVAILABLE");
   }
-  if (!response.ok) throw new JobDiscoveryError(`Adzuna returned HTTP ${response.status}.`, "JOB_SOURCE_REQUEST_FAILED");
-
-  const payload = await response.json();
+  const responseText = await response.text();
+  let payload;
+  try {
+    payload = JSON.parse(responseText);
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    const detail = payload?.error || payload?.message || responseText.replace(/\s+/g, " ").trim();
+    throw new JobDiscoveryError(`Adzuna returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 240)}` : "."}`, "JOB_SOURCE_REQUEST_FAILED");
+  }
   return Array.isArray(payload.results) ? payload.results : [];
 }
 
