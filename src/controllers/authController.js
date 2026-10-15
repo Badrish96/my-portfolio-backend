@@ -41,7 +41,7 @@ export const currentUser = (req, res) => res.json({
 });
 
 export const updateProfile = async (req, res) => {
-  const allowedFields = ["name", "username", "bio", "location", "website", "userType"];
+  const allowedFields = ["name", "username", "bio", "location", "website", "userType", "firstName", "middleName", "lastName", "mobilePhone", "countryCode", "gender", "nationality", "dateOfBirth", "currentSalaryCurrency", "expectedSalaryCurrency", "currentLocation", "experienceDetails"];
   const updates = {};
 
   for (const field of allowedFields) {
@@ -52,6 +52,9 @@ export const updateProfile = async (req, res) => {
   }
   if (req.body.experienceYears !== undefined) updates.experienceYears = Number(req.body.experienceYears);
   if (req.body.expectedCompensation !== undefined) updates.expectedCompensation = Number(req.body.expectedCompensation);
+  for (const field of ["currentSalary", "expectedSalary", "availableToJoin", "relevantExperienceYears"]) {
+    if (req.body[field] !== undefined && req.body[field] !== "") updates[field] = Number(req.body[field]);
+  }
 
   if (updates.name !== undefined && (updates.name.length < 2 || updates.name.length > 50)) {
     return res.status(400).json({ success: false, message: "Name must be between 2 and 50 characters." });
@@ -105,7 +108,7 @@ export const signup = async (req, res) => {
 export const signin = async (req, res) => {
   try {
     const user = await User.findOne({ email: req.body.email.toLowerCase() }).select(
-      "+passwordHash _id name username email userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats"
+      "+passwordHash _id name username email firstName middleName lastName mobilePhone countryCode gender nationality dateOfBirth currentSalary currentSalaryCurrency expectedSalary expectedSalaryCurrency availableToJoin currentLocation experienceDetails relevantExperienceYears userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats"
     );
     if (!user || !user.passwordHash || !(await verifyPassword(req.body.password, user.passwordHash))) {
       return res.status(401).json({ success: false, message: "Invalid email or password." });
@@ -133,7 +136,7 @@ export const googleSignin = async (req, res) => {
 
     const email = profile.email.toLowerCase();
     let user = await User.findOne({ email }).select(
-      "_id name username email userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats provider providerId"
+      "_id name username email firstName middleName lastName mobilePhone countryCode gender nationality dateOfBirth currentSalary currentSalaryCurrency expectedSalary expectedSalaryCurrency availableToJoin currentLocation experienceDetails relevantExperienceYears userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats provider providerId"
     );
     if (!user) {
       user = await User.create({
