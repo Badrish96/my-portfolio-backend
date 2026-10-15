@@ -5,6 +5,77 @@ import { authenticate } from "../middleware/authenticate.js";
 
 const router = express.Router();
 
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function getBoardMatch(parsedUrl) {
+  const hostname = parsedUrl.hostname.toLowerCase();
+  const source = hostname.includes("linkedin.")
+    ? "linkedin"
+    : hostname.includes("naukri.")
+      ? "naukri"
+      : hostname.includes("hirist.")
+        ? "hirist"
+        : hostname.includes("indeed.")
+          ? "indeed"
+          : hostname.includes("adzuna.")
+            ? "adzuna"
+            : "";
+
+  const externalIds = [];
+  const urlPatterns = [];
+  const addPathPattern = (path) => {
+    if (!source || !path || path === "/") return;
+    const pattern = new RegExp(`${escapeRegex(path.replace(/\/+$/, ""))}(?:[?#]|$)`, "i");
+    urlPatterns.push(
+      { source, applicationUrl: { $regex: pattern } },
+      { source, sourceUrl: { $regex: pattern } },
+    );
+  };
+
+  if (source === "indeed") {
+    const jobKey = parsedUrl.searchParams.get("jk")?.trim();
+    if (jobKey) {
+      externalIds.push(`indeed-${jobKey}`);
+      const pattern = new RegExp(`[?&]jk=${escapeRegex(jobKey)}(?:&|$)`, "i");
+      urlPatterns.push(
+        { source, applicationUrl: { $regex: pattern } },
+        { source, sourceUrl: { $regex: pattern } },
+      );
+    }
+  }
+
+  if (source === "linkedin") {
+    const jobId = parsedUrl.pathname.match(/(?:jobs\/view\/|job-detail[-/])([0-9]+)/i)?.[1];
+    if (jobId) {
+      externalIds.push(`linkedin-${jobId}`);
+      addPathPattern(`/jobs/view/${jobId}`);
+      addPathPattern(`/job-detail/${jobId}`);
+    }
+  }
+
+  if (source === "adzuna") {
+    const adzunaId = parsedUrl.pathname.match(/(?:details|land\/ad)[\-/]([0-9]+)/i)?.[1]
+      || parsedUrl.searchParams.get("id")?.trim();
+    if (adzunaId) {
+      externalIds.push(adzunaId);
+      addPathPattern(`/details/${adzunaId}`);
+      addPathPattern(`/land/ad/${adzunaId}`);
+      const pattern = new RegExp(`[?&]id=${escapeRegex(adzunaId)}(?:&|$)`, "i");
+      urlPatterns.push(
+        { source, applicationUrl: { $regex: pattern } },
+        { source, sourceUrl: { $regex: pattern } },
+      );
+    }
+  }
+
+  // Hirist detail links and Adzuna/board tracking links often preserve the
+  // same pathname while changing their query string. This also helps older
+  // imports whose externalId was generated from the original URL.
+  if (source === "hirist" || source === "naukri") addPathPattern(parsedUrl.pathname);
+
+  return { source, externalIds, urlPatterns };
+}
+
 router.get("/", authenticate, async (req, res) => {
   try {
     const applications = await Application.find({ user: req.user._id }).sort({ updatedAt: -1 }).populate("job").lean();
@@ -42,23 +113,13 @@ router.post("/mark-submitted", authenticate, async (req, res) => {
   }
 
   try {
-    const candidates = [applicationUrl];
-    const jobIdMatch = parsedUrl.pathname.match(/(?:jobs\/view\/|job-detail[-/])([0-9]+)/i);
-    const jobId = jobIdMatch?.[1] || "";
-    // LinkedIn appends tracking/query parameters and some boards use a full URL
-    // as externalId. Match the stable board job ID across every stored URL form.
-    const jobIdPattern = jobId
-      ? new RegExp(`(?:jobs\\/view\\/|job-detail[-\\/])${jobId}(?:[/?#]|$)`, "i")
-      : null;
+    const { source, externalIds, urlPatterns } = getBoardMatch(parsedUrl);
 
     const job = await Job.findOne({ $or: [
-      { applicationUrl: { $in: candidates.filter((candidate) => typeof candidate === "string") } },
-      { sourceUrl: { $in: candidates.filter((candidate) => typeof candidate === "string") } },
-      ...(jobIdPattern ? [
-        { externalId: { $regex: jobIdPattern } },
-        { applicationUrl: { $regex: jobIdPattern } },
-        { sourceUrl: { $regex: jobIdPattern } },
-      ] : []),
+      { applicationUrl },
+      { sourceUrl: applicationUrl },
+      ...externalIds.map((externalId) => ({ source, externalId })),
+      ...urlPatterns,
     ] }).lean();
     if (!job) return res.status(404).json({ success: false, message: "This job is not in your imported jobs yet. Scan the job-board page first." });
 
