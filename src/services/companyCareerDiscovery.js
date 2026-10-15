@@ -66,10 +66,9 @@ function potentialProfileMatch(job, profile) {
     .filter((term) => term.length >= 3);
   if (!roleTerms.length && !skillTerms.length) return true;
   const title = normalizeJobText(job.title);
-  const text = normalizeJobText(`${job.title} ${job.description}`);
   const titleMatchesRole = roleTerms.some((term) => title.includes(term));
-  const matchingSkills = skillTerms.filter((term) => text.includes(term)).length;
-  return titleMatchesRole || matchingSkills >= 2;
+  const titleMatchesSkill = skillTerms.some((term) => title.includes(term));
+  return titleMatchesRole || titleMatchesSkill;
 }
 
 function normalizeJob(company, raw, fields) {

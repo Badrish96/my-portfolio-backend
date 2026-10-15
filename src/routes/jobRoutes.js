@@ -11,8 +11,9 @@ import { discoverCompanyCareerJobs, stripHtml } from "../services/companyCareerD
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
-// Career pages often omit structured skill lists, so allow a solid review-level
-// match while still excluding weak/skip recommendations.
+// Career pages often omit structured skill lists. The general jobs list should
+// show every career job that was actually evaluated; the AI Matches endpoint
+// applies the stricter score/recommendation filter below.
 const MIN_CAREER_MATCH_SCORE = 45;
 
 async function filterRelevantCareerJobs(jobs, userId) {
@@ -25,7 +26,7 @@ async function filterRelevantCareerJobs(jobs, userId) {
   return jobs.filter((job) => {
     if (job.source !== "company-career") return true;
     const match = matchByJobId.get(job._id.toString());
-    return Boolean(match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip");
+    return Boolean(match);
   });
 }
 
