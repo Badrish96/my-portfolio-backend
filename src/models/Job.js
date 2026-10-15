@@ -11,6 +11,7 @@ const JobSchema = new Schema(
     location: { type: String, trim: true, maxlength: 160 },
     employmentType: { type: String, trim: true, maxlength: 80 },
     description: { type: String, required: true, maxlength: 30_000 },
+    applicationMessage: { type: String, trim: true, maxlength: 2000 },
     requiredSkills: { type: [String], default: [] },
     salaryMin: { type: Number },
     salaryMax: { type: Number },

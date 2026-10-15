@@ -124,6 +124,7 @@ const serializeJob = (job, match = null) => ({
   location: job.location || "",
   employmentType: job.employmentType || "",
   description: stripHtml(job.description),
+  applicationMessage: job.applicationMessage || "",
   requiredSkills: job.requiredSkills,
   salaryMin: job.salaryMin,
   salaryMax: job.salaryMax,
@@ -355,7 +356,7 @@ router.post("/:jobId/apply", authenticate, async (req, res) => {
     if (!job) return res.status(404).json({ success: false, message: "Job not found." });
     const application = await Application.findOneAndUpdate(
       { user: req.user._id, job: job._id },
-      { $setOnInsert: { user: req.user._id, job: job._id, status: "ready_for_review" } },
+      { $setOnInsert: { user: req.user._id, job: job._id, status: "ready_for_review", coverLetter: job.applicationMessage || "" } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).populate("job").lean();
     return res.status(201).json({ success: true, message: "Application prepared for your review. It was not submitted.", application: { id: application._id.toString(), status: application.status, job: serializeJob(application.job) } });

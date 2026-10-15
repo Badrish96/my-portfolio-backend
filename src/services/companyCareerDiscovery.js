@@ -2,6 +2,7 @@ import { deduplicateJobs, isAllowedJobLocation, isQualityJob, normalizeJobText }
 import { canonicalSkill, extractSkills } from "./skillMatching.js";
 
 const DEFAULT_LIMIT = 100;
+export const DEFAULT_RECRUITER_MESSAGE = "Hello, I’m interested in this opportunity and would welcome the chance to discuss how my experience could contribute to your team. Thank you for your consideration.";
 const CAREER_PAGE_HEADERS = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-IN,en;q=0.9",
@@ -94,6 +95,7 @@ function normalizeJob(company, raw, fields) {
     company: company.company,
     location,
     description: description.slice(0, 30000),
+    applicationMessage: DEFAULT_RECRUITER_MESSAGE,
     requiredSkills: Array.isArray(fields.requiredSkills) && fields.requiredSkills.length
       ? fields.requiredSkills
       : extractSkills(`${title} ${description}`),
