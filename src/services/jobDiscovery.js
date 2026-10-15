@@ -56,6 +56,20 @@ export function isExcludedJobCompany(company) {
   return EXCLUDED_COMPANIES.has(normalizeJobText(company).replace(/\s+/g, ""));
 }
 
+export function isValidJobSourceUrl(source, applicationUrl) {
+  try {
+    const url = new URL(applicationUrl);
+    const hostname = url.hostname.toLowerCase();
+    if (source === "naukri") return /(?:^|\.)naukri\.com$/.test(hostname) && /^\/job-listings(?:[-/]|$)/i.test(url.pathname);
+    if (source === "linkedin") return /(?:^|\.)linkedin\.com$/.test(hostname) && /\/jobs\//i.test(url.pathname);
+    if (source === "hirist") return /(?:^|\.)hirist\.tech$/.test(hostname);
+    if (source === "indeed") return /(?:^|\.)indeed\.[a-z.]+$/.test(hostname) && /(?:viewjob|jobs|clk)/i.test(url.pathname);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function isQualityJob(job) {
   const title = normalizeJobText(job.title);
   const company = normalizeJobText(job.company);
@@ -63,6 +77,7 @@ export function isQualityJob(job) {
   if (!title || title === "untitled job" || title === "job") return false;
   if (!company || company === "unknown" || company === "unknown company") return false;
   if (isExcludedJobCompany(job.company)) return false;
+  if (job.source && !isValidJobSourceUrl(job.source, job.applicationUrl)) return false;
   if (description.startsWith("review the original") && description.includes("listing")) return false;
   return description.length >= 20;
 }

@@ -6,7 +6,7 @@ import Application from "../models/Application.js";
 import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
-import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isQualityJob, JobDiscoveryError } from "../services/jobDiscovery.js";
+import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
@@ -100,7 +100,7 @@ router.get("/", authenticate, async (req, res) => {
 
   try {
     const jobs = await Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, 100)).lean();
-    return res.json({ success: true, jobs: deduplicateJobs(jobs.filter((job) => isAllowedJobLocation(job.location))).slice(0, limit).map((job) => serializeJob(job)) });
+    return res.json({ success: true, jobs: deduplicateJobs(jobs.filter((job) => isAllowedJobLocation(job.location) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
@@ -192,7 +192,7 @@ router.post("/discover", authenticate, async (req, res) => {
 router.post("/import", authenticate, async (req, res) => {
   const jobs = Array.isArray(req.body?.jobs) ? req.body.jobs.slice(0, 50) : [];
   if (!jobs.length) return res.status(400).json({ success: false, message: "At least one job is required." });
-  const parsedJobs = jobs.map((job) => importedJobInput.safeParse(job)).filter((result) => result.success).map((result) => result.data).filter(isQualityJob);
+  const parsedJobs = jobs.map((job) => importedJobInput.safeParse(job)).filter((result) => result.success).map((result) => result.data).filter((job) => isQualityJob(job) && isValidJobSourceUrl(job.source, job.applicationUrl));
   if (!parsedJobs.length) return res.status(400).json({ success: false, message: "No valid LinkedIn or Naukri jobs were supplied." });
 
   try {
