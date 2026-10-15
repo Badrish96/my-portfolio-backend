@@ -41,6 +41,7 @@ export const publicUser = (user) => ({
   currentSalaryCurrency: user.currentSalaryCurrency || "",
   expectedSalary: user.expectedSalary ?? 1600000,
   expectedSalaryCurrency: user.expectedSalaryCurrency || "INR",
+  compensationHikeExpectations: user.compensationHikeExpectations || "",
   availableToJoin: user.availableToJoin ?? null,
   currentLocation: user.currentLocation || user.location || "",
   experienceDetails: user.experienceDetails || resumeDefaults.experienceDetails,

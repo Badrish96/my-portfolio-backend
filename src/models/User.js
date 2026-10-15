@@ -32,6 +32,7 @@ const UserSchema = new Schema(
     currentSalaryCurrency: { type: String, trim: true },
     expectedSalary: { type: Number, min: 0 },
     expectedSalaryCurrency: { type: String, trim: true },
+    compensationHikeExpectations: { type: String, trim: true, maxlength: 200 },
     availableToJoin: { type: Number, min: 0 },
     currentLocation: { type: String, trim: true },
     experienceDetails: { type: String, maxlength: 3000 },

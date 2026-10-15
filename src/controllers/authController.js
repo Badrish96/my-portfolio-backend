@@ -41,7 +41,7 @@ export const currentUser = (req, res) => res.json({
 });
 
 export const updateProfile = async (req, res) => {
-  const allowedFields = ["name", "username", "bio", "location", "website", "userType", "firstName", "middleName", "lastName", "mobilePhone", "countryCode", "gender", "nationality", "dateOfBirth", "currentSalaryCurrency", "expectedSalaryCurrency", "currentLocation", "experienceDetails", "resumeSummary", "educationDetails", "projectDetails", "certifications", "achievements", "languages", "workAuthorization", "noticePeriod", "linkedinUrl", "githubUrl", "portfolioUrl"];
+  const allowedFields = ["name", "username", "bio", "location", "website", "userType", "firstName", "middleName", "lastName", "mobilePhone", "countryCode", "gender", "nationality", "dateOfBirth", "currentSalaryCurrency", "expectedSalaryCurrency", "compensationHikeExpectations", "currentLocation", "experienceDetails", "resumeSummary", "educationDetails", "projectDetails", "certifications", "achievements", "languages", "workAuthorization", "noticePeriod", "linkedinUrl", "githubUrl", "portfolioUrl"];
   const updates = {};
 
   for (const field of allowedFields) {
@@ -108,7 +108,7 @@ export const signup = async (req, res) => {
 export const signin = async (req, res) => {
   try {
     const user = await User.findOne({ email: req.body.email.toLowerCase() }).select(
-      "+passwordHash _id name username email firstName middleName lastName mobilePhone countryCode gender nationality dateOfBirth currentSalary currentSalaryCurrency expectedSalary expectedSalaryCurrency availableToJoin currentLocation experienceDetails relevantExperienceYears resumeSummary educationDetails projectDetails certifications achievements languages workAuthorization noticePeriod linkedinUrl githubUrl portfolioUrl userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats"
+      "+passwordHash _id name username email firstName middleName lastName mobilePhone countryCode gender nationality dateOfBirth currentSalary currentSalaryCurrency expectedSalary expectedSalaryCurrency compensationHikeExpectations availableToJoin currentLocation experienceDetails relevantExperienceYears resumeSummary educationDetails projectDetails certifications achievements languages workAuthorization noticePeriod linkedinUrl githubUrl portfolioUrl userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats"
     );
     if (!user || !user.passwordHash || !(await verifyPassword(req.body.password, user.passwordHash))) {
       return res.status(401).json({ success: false, message: "Invalid email or password." });
@@ -136,7 +136,7 @@ export const googleSignin = async (req, res) => {
 
     const email = profile.email.toLowerCase();
     let user = await User.findOne({ email }).select(
-      "_id name username email firstName middleName lastName mobilePhone countryCode gender nationality dateOfBirth currentSalary currentSalaryCurrency expectedSalary expectedSalaryCurrency availableToJoin currentLocation experienceDetails relevantExperienceYears resumeSummary educationDetails projectDetails certifications achievements languages workAuthorization noticePeriod linkedinUrl githubUrl portfolioUrl userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats provider providerId"
+      "_id name username email firstName middleName lastName mobilePhone countryCode gender nationality dateOfBirth currentSalary currentSalaryCurrency expectedSalary expectedSalaryCurrency compensationHikeExpectations availableToJoin currentLocation experienceDetails relevantExperienceYears resumeSummary educationDetails projectDetails certifications achievements languages workAuthorization noticePeriod linkedinUrl githubUrl portfolioUrl userType avatar bio location website skills preferredRoles preferredLocations experienceYears expectedCompensation roles stats provider providerId"
     );
     if (!user) {
       user = await User.create({
