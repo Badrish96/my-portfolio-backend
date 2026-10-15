@@ -83,6 +83,8 @@ export function isValidJobSourceUrl(source, applicationUrl) {
     if (source === "linkedin") return /(?:^|\.)linkedin\.com$/.test(hostname) && /\/jobs\//i.test(url.pathname);
     if (source === "hirist") return /(?:^|\.)hirist\.tech$/.test(hostname);
     if (source === "indeed") return /(?:^|\.)indeed\.[a-z.]+$/.test(hostname) && /(?:viewjob|jobs|clk)/i.test(url.pathname);
+    if (source === "adzuna") return /(?:^|\.)adzuna\.[a-z.]+$/.test(hostname) && /(?:job|jobs|details|ad\/)/i.test(`${url.pathname} ${url.search}`);
+    if (source === "generic") return /^https?:$/i.test(url.protocol);
     return true;
   } catch {
     return false;
@@ -126,6 +128,8 @@ async function searchLocation({ appId, appKey, country, query, location, results
     results_per_page: String(resultsPerPage),
     what: query,
     where: location,
+    sort_by: "date",
+    sort_dir: "down",
     "content-type": "application/json",
   });
 
