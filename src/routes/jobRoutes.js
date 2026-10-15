@@ -11,7 +11,9 @@ import { discoverCompanyCareerJobs, stripHtml } from "../services/companyCareerD
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
-const MIN_CAREER_MATCH_SCORE = 55;
+// Career pages often omit structured skill lists, so allow a solid review-level
+// match while still excluding weak/skip recommendations.
+const MIN_CAREER_MATCH_SCORE = 45;
 
 async function filterRelevantCareerJobs(jobs, userId) {
   const careerJobIds = jobs.filter((job) => job.source === "company-career").map((job) => job._id);
