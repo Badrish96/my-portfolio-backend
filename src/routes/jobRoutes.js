@@ -6,7 +6,7 @@ import Application from "../models/Application.js";
 import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
-import { discoverJobs, isAllowedJobLocation, JobDiscoveryError } from "../services/jobDiscovery.js";
+import { allowedJobLocationFilter, discoverJobs, isAllowedJobLocation, JobDiscoveryError } from "../services/jobDiscovery.js";
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
@@ -95,7 +95,7 @@ const serializeJob = (job, match = null) => ({
 router.get("/", authenticate, async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
   const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
-  const filter = { status: "open" };
+  const filter = { status: "open", ...allowedJobLocationFilter };
   if (search) filter.$text = { $search: search };
 
   try {
@@ -110,7 +110,7 @@ router.get("/", authenticate, async (req, res) => {
 router.get("/summary", authenticate, async (req, res) => {
   try {
     const [jobsDiscovered, applications, shortlisted, interviews, readyForReview] = await Promise.all([
-      Job.countDocuments({ status: "open" }),
+      Job.countDocuments({ status: "open", ...allowedJobLocationFilter }),
       Application.countDocuments({ user: req.user._id }),
       Application.countDocuments({ user: req.user._id, status: "shortlisted" }),
       Application.countDocuments({ user: req.user._id, status: "interview" }),

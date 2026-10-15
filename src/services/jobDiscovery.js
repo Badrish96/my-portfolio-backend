@@ -1,6 +1,14 @@
 const ADZUNA_BASE_URL = "https://api.adzuna.com/v1/api/jobs";
 
 export const DEFAULT_JOB_LOCATIONS = ["Gurugram", "Bangalore", "Noida", "Delhi NCR"];
+export const allowedJobLocationFilter = {
+  $or: [
+    { location: /\b(gurugram|gurgaon)\b/i },
+    { location: /\b(bangalore|bengaluru)\b/i },
+    { location: /\b(?:greater\s+)?noida\b/i },
+    { location: /\b(?:new\s+)?delhi(?:\s+ncr)?\b/i },
+  ],
+};
 
 export class JobDiscoveryError extends Error {
   constructor(message, code = "JOB_DISCOVERY_ERROR") {
