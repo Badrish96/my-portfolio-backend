@@ -224,6 +224,7 @@ router.post("/discover-careers", authenticate, async (req, res) => {
       discovered: savedJobs.length,
       companies: discovery.companies,
       sourceFailures: discovery.failures,
+      sourceDetails: discovery.sourceDetails,
       aiScored: scoreResults.filter((result) => result.status === "fulfilled").length,
       aiFailures: scoreResults.filter((result) => result.status === "rejected").length,
       message: savedJobs.length ? "Company career jobs discovered and scored successfully." : "No matching company career jobs were found. Add ATS or career-page sources to COMPANY_CAREER_SOURCES.",

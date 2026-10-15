@@ -27,7 +27,7 @@ function absoluteUrl(value, baseUrl) {
 
 function locationText(value) {
   if (Array.isArray(value)) return value.map(locationText).filter(Boolean).join(", ");
-  if (typeof value === "object" && value) return [value.city, value.addressLocality, value.name, value.label].filter(Boolean).join(", ");
+  if (typeof value === "object" && value) return [value.city, value.addressLocality, value.name, value.label, value.address].map(locationText).filter(Boolean).join(", ");
   return String(value || "").trim();
 }
 
@@ -104,6 +104,16 @@ async function ashbyJobs(company) {
   }));
 }
 
+function linkedAtsSource(company, html) {
+  const greenhouse = html.match(/https?:\/\/boards\.greenhouse\.io\/([^/?#"'\\]+)/i)?.[1];
+  if (greenhouse) return { ...company, ats: "greenhouse", board: greenhouse, careersUrl: `https://boards.greenhouse.io/${greenhouse}` };
+  const lever = html.match(/https?:\/\/jobs\.lever\.co\/([^/?#"'\\]+)/i)?.[1];
+  if (lever) return { ...company, ats: "lever", board: lever, careersUrl: `https://jobs.lever.co/${lever}` };
+  const ashby = html.match(/https?:\/\/jobs\.ashbyhq\.com\/([^/?#"'\\]+)/i)?.[1];
+  if (ashby) return { ...company, ats: "ashby", board: ashby, careersUrl: `https://jobs.ashbyhq.com/${ashby}` };
+  return null;
+}
+
 async function jsonLdJobs(company) {
   const response = await fetch(company.careersUrl, { signal: AbortSignal.timeout(20_000) });
   if (!response.ok) throw new Error(`Career page returned HTTP ${response.status}.`);
@@ -129,6 +139,10 @@ async function jsonLdJobs(company) {
       // Ignore malformed JSON-LD blocks and continue with other career sources.
     }
   }
+  if (!jobs.length) {
+    const atsSource = linkedAtsSource(company, html);
+    if (atsSource) return fetchCompanyJobs(atsSource);
+  }
   return jobs;
 }
 
@@ -146,5 +160,11 @@ export async function discoverCompanyCareerJobs(profile) {
   const jobs = results.flatMap((result) => result.status === "fulfilled" ? result.value : [])
     .filter((job) => isAllowedJobLocation(job.location) && isQualityJob(job) && potentialProfileMatch(job, profile));
   const failures = results.filter((result) => result.status === "rejected").length;
-  return { jobs: deduplicateJobs(jobs).slice(0, limit), companies: companies.length, failures };
+  const sourceDetails = results.map((result, index) => ({
+    company: companies[index].company,
+    status: result.status,
+    jobs: result.status === "fulfilled" ? result.value.length : 0,
+    error: result.status === "rejected" ? result.reason?.message || "Unknown source error" : undefined,
+  }));
+  return { jobs: deduplicateJobs(jobs).slice(0, limit), companies: companies.length, failures, sourceDetails };
 }
