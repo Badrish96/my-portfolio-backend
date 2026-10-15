@@ -18,7 +18,12 @@ function getBoardMatch(parsedUrl) {
         : hostname.includes("indeed.")
           ? "indeed"
           : hostname.includes("adzuna.")
-            ? "adzuna"
+          ? "adzuna"
+          : /(?:^|\.)(?:boards|job-boards)\.greenhouse\.io$/.test(hostname)
+            || hostname.includes("jobs.lever.co")
+            || hostname.includes("jobs.ashbyhq.com")
+            || hostname.includes("jobs.smartrecruiters.com")
+            ? "company-career"
             : "";
 
   const externalIds = [];
@@ -73,6 +78,19 @@ function getBoardMatch(parsedUrl) {
   // imports whose externalId was generated from the original URL.
   if (source === "hirist" || source === "naukri") addPathPattern(parsedUrl.pathname);
 
+  // ATS providers can expose the same listing through alternate hosts (for
+  // example boards.greenhouse.io and job-boards.greenhouse.io). Match the
+  // stable job path without restricting the source so older extension imports
+  // stored as generic jobs are also found.
+  if (source === "company-career" && parsedUrl.pathname !== "/") {
+    const path = parsedUrl.pathname.replace(/\/+$/, "");
+    const pattern = new RegExp(`${escapeRegex(path)}/?(?:[?#]|$)`, "i");
+    urlPatterns.push(
+      { applicationUrl: { $regex: pattern } },
+      { sourceUrl: { $regex: pattern } },
+    );
+  }
+
   return { source, externalIds, urlPatterns };
 }
 
@@ -115,27 +133,30 @@ router.post("/mark-submitted", authenticate, async (req, res) => {
   try {
     const { source, externalIds, urlPatterns } = getBoardMatch(parsedUrl);
 
-    const job = await Job.findOne({ $or: [
+    const jobs = await Job.find({ $or: [
       { applicationUrl },
       { sourceUrl: applicationUrl },
       ...externalIds.map((externalId) => ({ source, externalId })),
       ...urlPatterns,
     ] }).lean();
-    if (!job) return res.status(404).json({ success: false, message: "This job is not in your imported jobs yet. Scan the job-board page first." });
+    if (!jobs.length) return res.status(404).json({ success: false, message: "This job is not in your imported jobs yet. Scan the job-board page first." });
 
     const notes = typeof req.body?.notes === "string" ? req.body.notes.slice(0, 5000) : "Marked as applied from the Portfolio AI extension.";
-    const application = await Application.findOneAndUpdate(
+    const submittedAt = new Date();
+    const applications = await Promise.all(jobs.map((job) => Application.findOneAndUpdate(
       { user: req.user._id, job: job._id },
-      { $set: { status: "submitted", notes, submittedAt: new Date() } },
+      { $set: { status: "submitted", notes, submittedAt } },
       { new: true, upsert: true, setDefaultsOnInsert: true },
-    ).lean();
+    ).lean()));
+    const job = jobs[0];
+    const application = applications[0];
 
     return res.json({ success: true, application: {
       id: application._id.toString(),
       status: application.status,
       submittedAt: application.submittedAt,
       job: { id: job._id.toString(), title: job.title, company: job.company, applicationUrl: job.applicationUrl },
-    } });
+    }, matchedJobs: jobs.length });
   } catch (error) {
     console.error("Mark application submitted failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to mark this application as submitted." });
