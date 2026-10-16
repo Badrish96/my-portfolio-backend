@@ -1,5 +1,5 @@
 import { deduplicateJobs, isAllowedJobLocation, isQualityJob, normalizeJobText } from "./jobDiscovery.js";
-import { canonicalSkill, extractSkills } from "./skillMatching.js";
+import { extractSkills } from "./skillMatching.js";
 
 const DEFAULT_LIMIT = 100;
 export const DEFAULT_RECRUITER_MESSAGE = "Hello, I’m interested in this opportunity and would welcome the chance to discuss how my experience could contribute to your team. Thank you for your consideration.";
@@ -62,23 +62,6 @@ function locationText(value) {
   if (Array.isArray(value)) return value.map(locationText).filter(Boolean).join(", ");
   if (typeof value === "object" && value) return [value.city, value.addressLocality, value.region, value.country, value.name, value.label, value.address].map(locationText).filter(Boolean).join(", ");
   return String(value || "").trim();
-}
-
-function potentialProfileMatch(job, profile) {
-  const roleTerms = (profile.preferredRoles || [])
-    .map(canonicalSkill)
-    .filter((term) => term.length >= 3);
-  const skillTerms = (profile.verifiedSkills || [])
-    .map(normalizeJobText)
-    .filter((term) => term.length >= 3);
-  if (!roleTerms.length && !skillTerms.length) return true;
-  const title = normalizeJobText(job.title);
-  const descriptionSkills = extractSkills(`${job.title} ${job.description}`);
-  const titleMatchesRole = roleTerms.some((term) => title.includes(term));
-  const titleMatchesSkill = skillTerms.some((term) => title.includes(term));
-  const descriptionMatchesSkill = skillTerms.some((term) => descriptionSkills.includes(term) || normalizeJobText(job.description).includes(term));
-  const clearlyUnrelated = /\b(program manager|project manager|product manager|account executive|sales|recruiter|accountant|legal|finance|human resources|talent partner|intern|trainee)\b/.test(title);
-  return !clearlyUnrelated && (titleMatchesRole || titleMatchesSkill || descriptionMatchesSkill);
 }
 
 function normalizeJob(company, raw, fields) {
@@ -245,7 +228,7 @@ export async function discoverCompanyCareerJobs(profile) {
   const results = await Promise.allSettled(companies.map(fetchCompanyJobs));
   const companyResults = results.map((result, index) => {
     const fetchedJobs = result.status === "fulfilled" ? result.value : [];
-    const acceptedJobs = fetchedJobs.filter((job) => isAllowedJobLocation(job.location, profile.preferredLocations) && isQualityJob(job) && potentialProfileMatch(job, profile));
+    const acceptedJobs = fetchedJobs.filter((job) => isAllowedJobLocation(job.location, profile.preferredLocations) && isQualityJob(job));
     return { company: companies[index], result, fetchedJobs, acceptedJobs };
   });
   const jobs = companyResults.flatMap(({ acceptedJobs }) => acceptedJobs);
@@ -265,7 +248,7 @@ export async function discoverCompanyCareerJobs(profile) {
       : fetchedJobs.length === 0
         ? "No machine-readable JobPosting entries or supported ATS feed were exposed by this career page."
         : acceptedJobs.length === 0
-          ? "Fetched jobs were excluded by preferred location, quality, or profile matching filters."
+          ? "Fetched jobs were excluded by preferred location or listing-quality filters."
       : undefined,
   }));
   return { jobs: balancedJobs, companies: companies.length, failures, sourceDetails };

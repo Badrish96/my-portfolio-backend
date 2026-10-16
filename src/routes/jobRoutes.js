@@ -15,21 +15,8 @@ const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURR
 // Career pages often omit structured skill lists. The general jobs list should
 // show every career job that was actually evaluated; the AI Matches endpoint
 // applies the stricter score/recommendation filter below.
-const MIN_CAREER_MATCH_SCORE = 45;
-
-async function filterRelevantCareerJobs(jobs, userId) {
-  const careerJobIds = jobs.filter((job) => job.source === "company-career").map((job) => job._id);
-  if (!careerJobIds.length) return jobs;
-  const matches = await JobMatch.find({ user: userId, job: { $in: careerJobIds } })
-    .select("job matchScore recommendation")
-    .lean();
-  const matchByJobId = new Map(matches.map((match) => [match.job.toString(), match]));
-  return jobs.filter((job) => {
-    if (job.source !== "company-career") return true;
-    const match = matchByJobId.get(job._id.toString());
-    return Boolean(match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip");
-  });
-}
+const MIN_CAREER_MATCH_SCORE = 30;
+const CURRENT_MATCH_VERSIONS = new Set(["v2-description", "heuristic-v3-description", "ensemble-v2-description"]);
 
 async function getVisibleOpenJobs(userId, limit = 500) {
   const user = await User.findById(userId).select("preferredLocations").lean();
@@ -41,8 +28,7 @@ async function getVisibleOpenJobs(userId, limit = 500) {
       .lean(),
     getSubmittedJobIds(userId),
   ]);
-  const relevantJobs = await filterRelevantCareerJobs(jobs, userId);
-  return deduplicateJobs(relevantJobs.filter((job) =>
+  return deduplicateJobs(jobs.filter((job) =>
     !submittedJobIds.has(job._id.toString())
     && isAllowedJobLocation(job.location, preferredLocations)
     && isValidJobSourceUrl(job.source, job.applicationUrl),
@@ -122,6 +108,11 @@ const getCandidateProfile = (user) => ({
   preferredRoles: user.preferredRoles || [],
   preferredLocations: user.preferredLocations || [],
   verifiedExperienceYears: user.experienceYears || null,
+  resumeSummary: user.resumeSummary || "",
+  experienceDetails: user.experienceDetails || "",
+  educationDetails: user.educationDetails || "",
+  projectDetails: user.projectDetails || "",
+  certifications: user.certifications || "",
 });
 
 const serializeJob = (job, match = null) => ({
@@ -155,8 +146,40 @@ router.get("/", authenticate, async (req, res) => {
       Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, req.user.preferredLocations?.length ? 500 : 100)).lean(),
       getSubmittedJobIds(req.user._id),
     ]);
-    const visibleJobs = await filterRelevantCareerJobs(jobs, req.user._id);
-    return res.json({ success: true, jobs: deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location, req.user.preferredLocations) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit).map((job) => serializeJob(job)) });
+    const visibleJobs = jobs;
+    const displayJobs = deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location, req.user.preferredLocations) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit);
+    const matches = await JobMatch.find({ user: req.user._id, job: { $in: displayJobs.map((job) => job._id) } }).lean();
+    const matchByJobId = new Map(matches.map((match) => [match.job.toString(), match]));
+    const profile = getCandidateProfile(req.user);
+    const needsScoring = displayJobs.filter((job) => {
+      const match = matchByJobId.get(job._id.toString());
+      const profileUpdated = match && req.user.updatedAt && new Date(match.updatedAt) < new Date(req.user.updatedAt);
+      return !match || !CURRENT_MATCH_VERSIONS.has(match.scoringVersion) || profileUpdated;
+    }).slice(0, 5);
+    const rescored = await scoreWithLimit(needsScoring, async (job) => {
+      const result = await scoreJob(profile, job);
+      await JobMatch.findOneAndUpdate(
+        { user: req.user._id, job: job._id },
+        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      return { jobId: job._id.toString(), ...result };
+    });
+    for (const result of rescored) {
+      if (result.status === "fulfilled") matchByJobId.set(result.value.jobId, result.value);
+    }
+    return res.json({ success: true, jobs: displayJobs.map((job) => {
+      const match = matchByJobId.get(job._id.toString());
+      return serializeJob(job, match ? {
+        matchScore: match.matchScore,
+        recommendation: match.recommendation,
+        matchingSkills: match.matchingSkills,
+        missingSkills: match.missingSkills,
+        reasons: match.reasons,
+        concerns: match.concerns,
+        salaryCompatibility: match.salaryCompatibility,
+      } : null);
+    }) });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
@@ -182,7 +205,7 @@ router.get("/summary", authenticate, async (req, res) => {
 router.get("/suggestions", authenticate, async (req, res) => {
   try {
     const [matches, submittedJobIds] = await Promise.all([
-      JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(80).populate("job").lean(),
+      JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(120).populate("job").lean(),
       getSubmittedJobIds(req.user._id),
     ]);
     const qualityMatches = matches.filter((item) => item.job?.status === "open" && !submittedJobIds.has(item.job._id.toString()) && isAllowedJobLocation(item.job.location, req.user.preferredLocations) && isQualityJob(item.job) && item.matchScore >= MIN_CAREER_MATCH_SCORE && item.recommendation !== "skip");
@@ -330,7 +353,10 @@ router.post("/discover-careers", authenticate, async (req, res) => {
       { $set: job, $setOnInsert: { createdBy: req.user._id } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
-    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || 50, savedJobs.length);
+
+    // Score every career listing returned (up to COMPANY_CAREER_JOB_LIMIT),
+    // so valid matches later in a feed are not silently left unevaluated.
+    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || savedJobs.length, savedJobs.length);
     const scoreResults = await scoreWithLimit(savedJobs.slice(0, scoreLimit), async (job) => {
       const result = await scoreJob(profile, job);
       await JobMatch.findOneAndUpdate(
@@ -340,23 +366,25 @@ router.post("/discover-careers", authenticate, async (req, res) => {
       );
       return result;
     });
-    const visibleJobs = await getVisibleOpenJobs(req.user._id);
-    const visibleJobIds = new Set(visibleJobs.map((job) => job._id.toString()));
-    const visibleDiscovered = savedJobs.filter((job) => visibleJobIds.has(job._id.toString())).length;
+    const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
+    const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
     return res.json({
       success: true,
       discovered: savedJobs.length,
-      visibleDiscovered,
+      aiScored,
+      aiFailures,
       companies: discovery.companies,
       sourceFailures: discovery.failures,
       sourceDetails: discovery.sourceDetails,
-      aiScored: scoreResults.filter((result) => result.status === "fulfilled").length,
-      aiFailures: scoreResults.filter((result) => result.status === "rejected").length,
-      message: savedJobs.length ? "Company career jobs discovered and scored successfully." : "No matching company career jobs were found. Add ATS or career-page sources to COMPANY_CAREER_SOURCES.",
+      message: savedJobs.length === 0
+        ? "No company career jobs matched your preferred locations. Check your locations or the configured career sources."
+        : aiFailures
+          ? `Found ${savedJobs.length} company career jobs; ${aiFailures} could not be scored. They are still available on your dashboard for review.`
+          : `Found and checked ${savedJobs.length} company career jobs against your profile.`,
     });
   } catch (error) {
     console.error("Company career discovery failed:", error.message);
-    return res.status(502).json({ success: false, message: error.message || "Unable to discover company career jobs." });
+    return res.status(500).json({ success: false, message: error.message || "Unable to check company career pages." });
   }
 });
 

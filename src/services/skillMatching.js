@@ -28,6 +28,23 @@ const SKILL_ALIASES = {
   "html": ["html", "html5"],
   "css": ["css", "css3"],
   "tailwind css": ["tailwind", "tailwind css"],
+  "etl": ["etl", "extract transform load", "extract transform and load", "data pipeline", "data pipelines"],
+  "apache spark": ["spark", "apache spark"],
+  "pyspark": ["pyspark", "py spark"],
+  "kafka": ["kafka", "apache kafka"],
+  "hadoop": ["hadoop", "apache hadoop"],
+  "airflow": ["airflow", "apache airflow"],
+  "snowflake": ["snowflake"],
+  "databricks": ["databricks"],
+  "dbt": ["dbt", "data build tool"],
+  "amazon redshift": ["redshift", "amazon redshift"],
+  "google bigquery": ["bigquery", "google bigquery"],
+  "informatica": ["informatica", "powercenter"],
+  "talend": ["talend"],
+  "ssis": ["ssis", "sql server integration services"],
+  "teradata": ["teradata"],
+  "data warehousing": ["data warehouse", "data warehousing", "dimensional modeling"],
+  "data modeling": ["data model", "data modeling", "data modelling"],
 };
 
 const aliasToCanonical = new Map(Object.entries(SKILL_ALIASES).flatMap(([canonical, aliases]) => aliases.map((alias) => [normalizeJobText(alias), canonical])));

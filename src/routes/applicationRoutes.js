@@ -171,9 +171,9 @@ router.post("/mark-submitted", authenticate, async (req, res) => {
           title: { $regex: titlePattern },
           company: { $regex: companyPattern },
         }).limit(3).lean();
-        if (jobs.length > 1) {
-          return res.status(409).json({ success: false, message: "More than one imported job matches this SmartRecruiters posting. Open the matching job from the dashboard to mark the correct one as submitted." });
-        }
+        // The dashboard collapses duplicate imports with the same company and
+        // title into one card. Mark those underlying duplicate records together
+        // so they do not leave an apparently open copy behind.
       }
     }
     if (!jobs.length) return res.status(404).json({ success: false, message: "This job is not in your imported jobs yet. Scan the job-board page first." });
