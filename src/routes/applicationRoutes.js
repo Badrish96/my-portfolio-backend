@@ -91,6 +91,23 @@ function getBoardMatch(parsedUrl) {
     );
   }
 
+  // SmartRecruiters can send applicants through a one-click URL such as
+  // /oneclick-ui/company/<company>/publication/<posting-id>, while the
+  // imported job uses its canonical /<company>/<posting-id> URL. Match the
+  // stable publication ID so both URLs resolve to the same imported posting.
+  if (hostname.includes("jobs.smartrecruiters.com")) {
+    const publicationId = parsedUrl.pathname.match(/\/publication\/([^/?#]+)/i)?.[1];
+    if (publicationId) {
+      const escapedId = escapeRegex(publicationId);
+      const idPattern = new RegExp(`${escapedId}(?:[/?#]|$)`, "i");
+      urlPatterns.push(
+        { applicationUrl: { $regex: idPattern } },
+        { sourceUrl: { $regex: idPattern } },
+        { externalId: { $regex: idPattern } },
+      );
+    }
+  }
+
   return { source, externalIds, urlPatterns };
 }
 
