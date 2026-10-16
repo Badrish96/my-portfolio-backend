@@ -1,0 +1,161 @@
+﻿[
+    {
+        "company":  "Google India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.google.com/about/careers/applications/jobs/results/?location=India"
+    },
+    {
+        "company":  "Microsoft India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://jobs.careers.microsoft.com/global/en/search?lc=India"
+    },
+    {
+        "company":  "Oracle India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.oracle.com/careers/"
+    },
+    {
+        "company":  "SAP Labs India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://jobs.sap.com/"
+    },
+    {
+        "company":  "TCS",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.tcs.com/careers/india"
+    },
+    {
+        "company":  "Infosys",
+        "ats":  "jsonld",
+        "careersUrl":  "https://career.infosys.com/"
+    },
+    {
+        "company":  "Wipro",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.wipro.com/viewalljobs/?locale=en_US"
+    },
+    {
+        "company":  "HCLTech",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.hcltech.com/careers"
+    },
+    {
+        "company":  "Cognizant",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.cognizant.com/"
+    },
+    {
+        "company":  "Accenture India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.accenture.com/in-en/careers"
+    },
+    {
+        "company":  "Capgemini",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.capgemini.com/careers/"
+    },
+    {
+        "company":  "Tech Mahindra",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.techmahindra.com/"
+    },
+    {
+        "company":  "IBM India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.ibm.com/careers"
+    },
+    {
+        "company":  "Genpact",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.genpact.com/careers"
+    },
+    {
+        "company":  "Thoughtworks",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.thoughtworks.com/en-in/careers/jobs"
+    },
+    {
+        "company":  "Publicis Sapient",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.publicissapient.com/"
+    },
+    {
+        "company":  "Nagarro",
+        "ats":  "smartrecruiters",
+        "board":  "Nagarro1",
+        "careersUrl":  "https://jobs.smartrecruiters.com/Nagarro1/"
+    },
+    {
+        "company":  "Adobe India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.adobe.com/careers.html"
+    },
+    {
+        "company":  "Gartner India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://jobs.gartner.com/locations/gurgaon/"
+    },
+    {
+        "company":  "EXL Service",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.exlservice.com/careers"
+    },
+    {
+        "company":  "GrapeCity MESCIUS",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.grapecity.com/careers"
+    },
+    {
+        "company":  "Birlasoft",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.birlasoft.com/"
+    },
+    {
+        "company":  "STMicroelectronics",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.st.com/"
+    },
+    {
+        "company":  "ServiceNow India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.servicenow.com/"
+    },
+    {
+        "company":  "Rubrik India",
+        "ats":  "greenhouse",
+        "board":  "rubrik",
+        "careersUrl":  "https://boards.greenhouse.io/rubrik"
+    },
+    {
+        "company":  "Bosch Engineering India",
+        "ats":  "smartrecruiters",
+        "board":  "BoschGroup",
+        "careersUrl":  "https://jobs.smartrecruiters.com/BoschGroup/"
+    },
+    {
+        "company":  "Airbus India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.airbus.com/en/careers"
+    },
+    {
+        "company":  "JPMorgan Chase India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://careers.jpmorgan.com/"
+    },
+    {
+        "company":  "Wells Fargo India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://www.wellsfargojobs.com/"
+    },
+    {
+        "company":  "Fidelity Investments India",
+        "ats":  "jsonld",
+        "careersUrl":  "https://jobs.fidelity.com/"
+    },
+    {
+        "company":  "PayPay India",
+        "ats":  "greenhouse",
+        "board":  "pay2dc",
+        "careersUrl":  "https://job-boards.greenhouse.io/pay2dc"
+    }
+]

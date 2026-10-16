@@ -114,7 +114,22 @@ export function deduplicateJobs(jobs) {
   const seen = new Set();
   return jobs.filter((job) => {
     if (!isQualityJob(job)) return false;
-    const key = jobRoleKey(job);
+    // A company can appear under different display names across a bundled
+    // source list and a deployment override. The same apply URL is the stable
+    // identity for those duplicate ATS records.
+    let postingUrl = "";
+    try {
+      const url = new URL(job.applicationUrl);
+      for (const key of [...url.searchParams.keys()]) {
+        if (/^(utm_.+|oga|source|ref|trackingid)$/i.test(key)) url.searchParams.delete(key);
+      }
+      url.searchParams.sort();
+      url.hash = "";
+      postingUrl = url.toString().replace(/\/$/, "").toLowerCase();
+    } catch {
+      // Keep the company/title fallback for malformed or missing URLs.
+    }
+    const key = postingUrl || jobRoleKey(job);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

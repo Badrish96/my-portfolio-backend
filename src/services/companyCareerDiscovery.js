@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
 import { deduplicateJobs, isAllowedJobLocation, isQualityJob, normalizeJobText } from "./jobDiscovery.js";
 import { extractSkills } from "./skillMatching.js";
 
 const DEFAULT_LIMIT = 100;
+const DEFAULT_COMPANIES = JSON.parse(readFileSync(new URL("../config/companyCareerSources.json", import.meta.url), "utf8").replace(/^\uFEFF/, ""));
 export const DEFAULT_RECRUITER_MESSAGE = "Hello, I’m interested in this opportunity and would welcome the chance to discuss how my experience could contribute to your team. Thank you for your consideration.";
 const CAREER_PAGE_HEADERS = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -10,14 +12,23 @@ const CAREER_PAGE_HEADERS = {
 };
 
 function configuredCompanies() {
-  const raw = String(process.env.COMPANY_CAREER_SOURCES || "[]");
+  const raw = String(process.env.COMPANY_CAREER_SOURCES || "").trim();
+  let configured = [];
   try {
-    const companies = JSON.parse(raw);
-    return Array.isArray(companies) ? companies.filter((company) => company?.company) : [];
+    configured = raw ? JSON.parse(raw.replace(/^\uFEFF/, "")) : [];
   } catch (error) {
     console.error("COMPANY_CAREER_SOURCES is not valid JSON:", error.message);
-    return [];
+    configured = [];
   }
+  const sources = new Map();
+  for (const company of [...DEFAULT_COMPANIES, ...(Array.isArray(configured) ? configured : [])]) {
+    if (!company?.company) continue;
+    const identity = company.ats && company.board
+      ? `${String(company.ats).toLowerCase()}::${String(company.board).toLowerCase()}`
+      : normalizeJobText(company.careersUrl || company.company);
+    sources.set(identity, company);
+  }
+  return [...sources.values()];
 }
 
 function decodeHtmlEntities(value) {

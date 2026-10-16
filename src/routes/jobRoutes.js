@@ -368,12 +368,16 @@ router.post("/discover-careers", authenticate, async (req, res) => {
     });
     const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
     const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
+    const activeSources = discovery.sourceDetails.filter((source) => source.returned > 0).length;
+    const unreadableSources = discovery.sourceDetails.filter((source) => source.status === "rejected" || source.fetched === 0).length;
     return res.json({
       success: true,
       discovered: savedJobs.length,
       aiScored,
       aiFailures,
       companies: discovery.companies,
+      activeSources,
+      unreadableSources,
       sourceFailures: discovery.failures,
       sourceDetails: discovery.sourceDetails,
       message: savedJobs.length === 0
