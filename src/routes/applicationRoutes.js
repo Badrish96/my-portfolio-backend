@@ -150,12 +150,32 @@ router.post("/mark-submitted", authenticate, async (req, res) => {
   try {
     const { source, externalIds, urlPatterns } = getBoardMatch(parsedUrl);
 
-    const jobs = await Job.find({ $or: [
+    let jobs = await Job.find({ $or: [
       { applicationUrl },
       { sourceUrl: applicationUrl },
       ...externalIds.map((externalId) => ({ source, externalId })),
       ...urlPatterns,
     ] }).lean();
+
+    // Some ATS imports do not retain the publication ID in their canonical
+    // URL. If the SmartRecruiters page exposes the exact job title and company,
+    // use both as a narrow fallback instead of matching on company alone.
+    if (!jobs.length && hostnameIsSmartRecruiters(parsedUrl.hostname)) {
+      const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 200) : "";
+      const company = typeof req.body?.company === "string" ? req.body.company.trim().replace(/\d+$/, "").slice(0, 160) : "";
+      if (title.length >= 3 && company.length >= 2) {
+        const titlePattern = new RegExp(`^\\s*${escapeRegex(title)}\\s*$`, "i");
+        const companyPattern = new RegExp(`^\\s*${escapeRegex(company)}\\d*\\s*$`, "i");
+        jobs = await Job.find({
+          source: { $in: ["company-career", "generic"] },
+          title: { $regex: titlePattern },
+          company: { $regex: companyPattern },
+        }).limit(3).lean();
+        if (jobs.length > 1) {
+          return res.status(409).json({ success: false, message: "More than one imported job matches this SmartRecruiters posting. Open the matching job from the dashboard to mark the correct one as submitted." });
+        }
+      }
+    }
     if (!jobs.length) return res.status(404).json({ success: false, message: "This job is not in your imported jobs yet. Scan the job-board page first." });
 
     const notes = typeof req.body?.notes === "string" ? req.body.notes.slice(0, 5000) : "Marked as applied from the Portfolio AI extension.";
@@ -179,6 +199,10 @@ router.post("/mark-submitted", authenticate, async (req, res) => {
     return res.status(500).json({ success: false, message: "Unable to mark this application as submitted." });
   }
 });
+
+function hostnameIsSmartRecruiters(hostname) {
+  return /(?:^|\.)jobs\.smartrecruiters\.com$/i.test(String(hostname || ""));
+}
 
 router.patch("/:applicationId", authenticate, async (req, res) => {
   const allowedStatuses = ["shortlisted", "skipped", "ready_for_review", "approved", "submitted", "interview", "rejected", "withdrawn"];
