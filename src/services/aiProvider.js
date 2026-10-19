@@ -3,7 +3,12 @@ import ollama from "ollama";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b";
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
-const DEFAULT_RETRY_ATTEMPTS = 2;
+// A 429 from Groq is a quota state, not a transient network failure. Retrying
+// every career listing multiplies the delay and keeps the dashboard request
+// pending even though the deterministic fallback matcher is available.
+const DEFAULT_RETRY_ATTEMPTS = 0;
+const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5 * 60_000;
+let groqRateLimitedUntil = 0;
 
 export class AIProviderError extends Error {
   constructor(message, { code = "AI_PROVIDER_ERROR", retryable = false } = {}) {
@@ -53,8 +58,12 @@ function createGroqProvider(modelOverride) {
     model: modelOverride || process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL,
     async generateText({ system, user, jsonSchema }) {
       if (!process.env.GROQ_API_KEY) throw new AIProviderError("GROQ_API_KEY is not configured.", { code: "AI_NOT_CONFIGURED" });
+      if (Date.now() < groqRateLimitedUntil) {
+        throw new AIProviderError("Groq rate limit is active; using the local fallback matcher.", { code: "AI_RATE_LIMITED", retryable: false });
+      }
       const model = modelOverride || process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
-      const retries = Math.max(0, Math.min(Number(process.env.AI_RETRY_ATTEMPTS) || DEFAULT_RETRY_ATTEMPTS, 3));
+      const configuredRetries = process.env.AI_RETRY_ATTEMPTS;
+      const retries = Math.max(0, Math.min(configuredRetries === undefined ? DEFAULT_RETRY_ATTEMPTS : Number(configuredRetries) || 0, 3));
       const maxOutputTokens = Math.max(256, Math.min(Number(process.env.AI_MAX_OUTPUT_TOKENS) || DEFAULT_MAX_OUTPUT_TOKENS, 1500));
 
       for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -79,13 +88,15 @@ function createGroqProvider(modelOverride) {
           }
 
           const detail = await response.text();
-          if (response.status === 429 && attempt < retries) {
+          if (response.status === 429) {
             const retryAfterHeader = Number(response.headers.get("retry-after"));
             const retryAfterMessage = Number(detail.match(/try again in ([0-9.]+)s/i)?.[1]);
-            const waitMs = Math.min(10_000, Math.max(1_000, Math.ceil((retryAfterHeader || retryAfterMessage || 2) * 1000)));
-            console.warn(`Groq rate limit reached. Retrying in ${waitMs}ms (attempt ${attempt + 1}/${retries}).`);
-            await new Promise((resolve) => setTimeout(resolve, waitMs));
-            continue;
+            const cooldownMs = Math.min(
+              10 * 60_000,
+              Math.max(30_000, Math.ceil((retryAfterHeader || retryAfterMessage || DEFAULT_RATE_LIMIT_COOLDOWN_MS / 1000) * 1000)),
+            );
+            groqRateLimitedUntil = Date.now() + cooldownMs;
+            console.warn(`Groq rate limit reached; disabling Groq calls for ${Math.ceil(cooldownMs / 60_000)} minute(s) and using fallback matching.`);
           }
 
           const message = response.status === 404
