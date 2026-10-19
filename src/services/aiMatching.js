@@ -112,7 +112,7 @@ function fallbackMatch(profile, job, metadata = {}) {
     concerns: missingSkills.length ? [`Missing or unconfirmed skills: ${missingSkills.join(", ")}.`] : [],
     salaryCompatibility: "unknown",
     provider: "heuristic-fallback",
-    scoringVersion: "heuristic-v3-description",
+    scoringVersion: "v3-relevance-guard",
     aiFallback: true,
     ...metadata,
   };
@@ -150,7 +150,7 @@ async function scoreWithModel(profile, job, model) {
     normalizeMatchResult,
   );
 
-  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v2-description" };
+  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v3-relevance-guard" };
 }
 
 function median(values) {
@@ -179,7 +179,7 @@ function mergeModelResults(profile, job, results) {
     concerns: [...new Set(results.flatMap((result) => result.concerns))].slice(0, 5),
     salaryCompatibility: mostCommon(results.map((result) => result.salaryCompatibility), "unknown"),
     provider: "ensemble",
-    scoringVersion: "ensemble-v2-description",
+    scoringVersion: "v3-relevance-guard",
     modelsUsed: results.map((result) => result.model),
     agreement,
     modelResults: results.map(({ model, provider, matchScore, recommendation, matchingSkills, missingSkills }) => ({ model, provider, matchScore, recommendation, matchingSkills, missingSkills })),

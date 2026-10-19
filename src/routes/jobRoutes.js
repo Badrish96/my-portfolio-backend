@@ -16,7 +16,9 @@ const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURR
 // show every career job that was actually evaluated; the AI Matches endpoint
 // applies the stricter score/recommendation filter below.
 const MIN_CAREER_MATCH_SCORE = 30;
-const CURRENT_MATCH_VERSIONS = new Set(["v2-description", "heuristic-v3-description", "ensemble-v2-description"]);
+// Bump this whenever matching rules change. Existing matches must be rescored
+// so an old overconfident AI result cannot remain in the suggestions feed.
+const CURRENT_MATCH_VERSIONS = new Set(["v3-relevance-guard"]);
 
 async function getVisibleOpenJobs(userId, limit = 500) {
   const user = await User.findById(userId).select("preferredLocations").lean();
