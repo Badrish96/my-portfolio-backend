@@ -58,14 +58,15 @@ function recommendationForScore(score) {
   return "skip";
 }
 
-function applyRelevanceGuard(profile, job, result) {
+export function applyRelevanceGuard(profile, job, result) {
   const jobText = `${job.title || ""} ${job.description || ""}`;
   const skillResult = matchSkills(profile.verifiedSkills || [], job.requiredSkills || [], jobText);
-  const normalizedText = jobText.toLowerCase();
+  const normalizedTitle = String(job.title || "").toLowerCase();
   const roleHit = (profile.preferredRoles || []).some((role) => {
-    const words = String(role).toLowerCase().match(/[a-z0-9+#.]{2,}/g) || [];
-    const equivalent = { developer: ["developer", "engineer", "programmer"], engineer: ["engineer", "developer", "programmer"], frontend: ["frontend", "front-end", "ui"], "full-stack": ["full-stack", "full stack"] };
-    const hits = words.filter((word) => (equivalent[word] || [word]).some((candidate) => normalizedText.includes(candidate)));
+    const ignored = new Set(["senior", "sr", "junior", "jr", "software", "technology", "technical", "developer", "engineer", "programmer"]);
+    const words = String(role).toLowerCase().match(/[a-z0-9+#.]+/g)?.filter((word) => !ignored.has(word)) || [];
+    const equivalent = { frontend: ["frontend", "front-end", "ui"], backend: ["backend", "back-end", "server-side"], "full-stack": ["full-stack", "full stack", "fullstack"], mobile: ["mobile", "ios", "android"], data: ["data", "etl", "analytics"] };
+    const hits = words.filter((word) => (equivalent[word] || [word]).some((candidate) => normalizedTitle.includes(candidate)));
     return words.length > 0 && hits.length >= Math.max(1, Math.ceil(words.length * 0.6));
   });
   // Model-only scores can be overconfident when a listing contains generic
@@ -79,7 +80,13 @@ function applyRelevanceGuard(profile, job, result) {
       concerns: [...new Set([...(result.concerns || []), "No preferred role or verified skill was found in the listing."])],
     };
   }
-  return { ...result, recommendation: recommendationForScore(Number(result.matchScore) || 0) };
+  if (!skillResult.matching.length) {
+    // A title-only category match is useful for review, but must never become
+    // a high-confidence recommendation without a verified skill overlap.
+    return { ...result, matchScore: Math.min(Number(result.matchScore) || 0, 59), recommendation: "review" };
+  }
+  const evidenceCeiling = Math.min(100, 55 + skillResult.matching.length * 12 + (roleHit ? 15 : 0));
+  return { ...result, matchScore: Math.min(Number(result.matchScore) || 0, evidenceCeiling), recommendation: recommendationForScore(Math.min(Number(result.matchScore) || 0, evidenceCeiling)) };
 }
 
 function fallbackMatch(profile, job, metadata = {}) {
@@ -114,7 +121,7 @@ function fallbackMatch(profile, job, metadata = {}) {
     concerns: missingSkills.length ? [`Missing or unconfirmed skills: ${missingSkills.join(", ")}.`] : [],
     salaryCompatibility: "unknown",
     provider: "heuristic-fallback",
-    scoringVersion: "v3-relevance-guard",
+    scoringVersion: "v4-evidence-gated",
     aiFallback: true,
     ...metadata,
   };
@@ -152,7 +159,7 @@ async function scoreWithModel(profile, job, model) {
     normalizeMatchResult,
   );
 
-  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v3-relevance-guard" };
+  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v4-evidence-gated" };
 }
 
 function median(values) {
@@ -181,7 +188,7 @@ function mergeModelResults(profile, job, results) {
     concerns: [...new Set(results.flatMap((result) => result.concerns))].slice(0, 5),
     salaryCompatibility: mostCommon(results.map((result) => result.salaryCompatibility), "unknown"),
     provider: "ensemble",
-    scoringVersion: "v3-relevance-guard",
+    scoringVersion: "v4-evidence-gated",
     modelsUsed: results.map((result) => result.model),
     agreement,
     modelResults: results.map(({ model, provider, matchScore, recommendation, matchingSkills, missingSkills }) => ({ model, provider, matchScore, recommendation, matchingSkills, missingSkills })),

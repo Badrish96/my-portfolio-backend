@@ -15,10 +15,10 @@ const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURR
 // Career pages often omit structured skill lists. The general jobs list should
 // show every career job that was actually evaluated; the AI Matches endpoint
 // applies the stricter score/recommendation filter below.
-const MIN_CAREER_MATCH_SCORE = 30;
+const MIN_CAREER_MATCH_SCORE = 60;
 // Bump this whenever matching rules change. Existing matches must be rescored
 // so an old overconfident AI result cannot remain in the suggestions feed.
-const CURRENT_MATCH_VERSIONS = new Set(["v3-relevance-guard"]);
+const CURRENT_MATCH_VERSIONS = new Set(["v4-evidence-gated"]);
 
 async function getVisibleOpenJobs(userId, limit = 500) {
   const user = await User.findById(userId).select("preferredLocations").lean();
@@ -283,7 +283,8 @@ router.post("/assistant/chat", authenticate, async (req, res) => {
       const profileHits = profileTerms.filter((term) => text.includes(term)).length;
       const rank = queryHits * 12 + profileHits * 3 + (match?.matchScore || 0) / 10;
       return { job, match, rank, queryHits };
-    }).sort((a, b) => b.rank - a.rank).slice(0, 8);
+    }).filter(({ match }) => match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip")
+      .sort((a, b) => b.rank - a.rank).slice(0, 8);
     const assistantJobs = ranked.map(({ job, match }) => serializeJob(job, match ? {
       matchScore: match.matchScore,
       recommendation: match.recommendation,
