@@ -220,6 +220,8 @@ router.get("/", authenticate, async (req, res) => {
         reasons: match.reasons,
         concerns: match.concerns,
         salaryCompatibility: match.salaryCompatibility,
+        provider: match.provider,
+        scoringVersion: match.scoringVersion,
       } : null);
     }) });
   } catch (error) {
@@ -283,6 +285,8 @@ router.get("/suggestions", authenticate, async (req, res) => {
       reasons: item.reasons,
       concerns: item.concerns,
       salaryCompatibility: item.salaryCompatibility,
+      provider: item.provider,
+      scoringVersion: item.scoringVersion,
       modelsUsed: item.modelsUsed,
       agreement: item.agreement,
       modelResults: item.modelResults,
@@ -324,6 +328,8 @@ router.post("/assistant/chat", authenticate, async (req, res) => {
       matchingSkills: match.matchingSkills,
       missingSkills: match.missingSkills,
       reasons: match.reasons,
+      provider: match.provider,
+      scoringVersion: match.scoringVersion,
     } : null));
 
     let reply;
