@@ -12,6 +12,7 @@ import { discoverCompanyCareerJobs, stripHtml } from "../services/companyCareerD
 
 const router = express.Router();
 const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
+const activeAdzunaDiscoveries = new Map();
 // Career pages often omit structured skill lists. The general jobs list should
 // show every career job that was actually evaluated; the AI Matches endpoint
 // applies the stricter score/recommendation filter below.
@@ -19,6 +20,15 @@ const MIN_CAREER_MATCH_SCORE = 60;
 // Bump this whenever matching rules change. Existing matches must be rescored
 // so an old overconfident AI result cannot remain in the suggestions feed.
 const CURRENT_MATCH_VERSIONS = new Set(["v7-specialty-technology-guard"]);
+
+function discoverAdzunaOnce(userId, profile) {
+  const key = String(userId);
+  const active = activeAdzunaDiscoveries.get(key);
+  if (active) return active;
+  const request = discoverJobs(profile).finally(() => activeAdzunaDiscoveries.delete(key));
+  activeAdzunaDiscoveries.set(key, request);
+  return request;
+}
 
 async function getVisibleOpenJobs(userId, limit = 500) {
   const user = await User.findById(userId).select("preferredLocations").lean();
@@ -334,7 +344,7 @@ router.post("/assistant/chat", authenticate, async (req, res) => {
 router.post("/discover", authenticate, async (req, res) => {
   try {
     const profile = getCandidateProfile(req.user);
-    const discovery = await discoverJobs(profile);
+    const discovery = await discoverAdzunaOnce(req.user._id, profile);
     const savedJobs = await Promise.all(discovery.jobs.map((job) => Job.findOneAndUpdate(
       { source: job.source, externalId: job.externalId },
       { $set: job, $setOnInsert: { createdBy: req.user._id } },
@@ -373,6 +383,11 @@ router.post("/discover", authenticate, async (req, res) => {
       message,
     });
   } catch (error) {
+    if (error instanceof JobDiscoveryError && error.code === "JOB_SOURCE_RATE_LIMITED") {
+      const retryAfterSeconds = Math.max(1, Number(error.retryAfterSeconds) || 60);
+      res.set("Retry-After", String(retryAfterSeconds));
+      return res.status(429).json({ success: false, code: error.code, retryAfterSeconds, message: error.message });
+    }
     const status = error instanceof JobDiscoveryError && error.code === "JOB_SOURCE_NOT_CONFIGURED" ? 503 : error.code === "PROFILE_SEARCH_DATA_REQUIRED" ? 400 : 502;
     console.error("Job discovery failed:", error.message);
     return res.status(status).json({ success: false, message: error.message || "Unable to discover jobs." });

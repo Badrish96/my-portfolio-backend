@@ -1,4 +1,7 @@
 const ADZUNA_BASE_URL = "https://api.adzuna.com/v1/api/jobs";
+const ADZUNA_MAX_REQUESTS = 6;
+const ADZUNA_REQUEST_CONCURRENCY = 2;
+let adzunaRateLimitedUntil = 0;
 import { extractSkills } from "./skillMatching.js";
 
 export const DEFAULT_JOB_LOCATIONS = ["Gurugram", "Bangalore", "Noida", "Delhi NCR"];
@@ -24,10 +27,11 @@ export const allowedJobLocationFilter = {
 };
 
 export class JobDiscoveryError extends Error {
-  constructor(message, code = "JOB_DISCOVERY_ERROR") {
+  constructor(message, code = "JOB_DISCOVERY_ERROR", details = {}) {
     super(message);
     this.name = "JobDiscoveryError";
     this.code = code;
+    Object.assign(this, details);
   }
 }
 
@@ -175,6 +179,10 @@ export function deduplicateJobs(jobs) {
 }
 
 async function searchLocation({ appId, appKey, country, query, location, resultsPerPage }) {
+  if (Date.now() < adzunaRateLimitedUntil) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((adzunaRateLimitedUntil - Date.now()) / 1000));
+    throw new JobDiscoveryError(`Adzuna is rate limiting requests. Try again in about ${retryAfterSeconds} seconds.`, "JOB_SOURCE_RATE_LIMITED", { retryAfterSeconds });
+  }
   const params = new URLSearchParams({
     app_id: appId,
     app_key: appKey,
@@ -199,10 +207,35 @@ async function searchLocation({ appId, appKey, country, query, location, results
     payload = null;
   }
   if (!response.ok) {
+    if (response.status === 429) {
+      const retryAfterHeader = Number(response.headers.get("retry-after"));
+      const retryAfterSeconds = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : 60;
+      adzunaRateLimitedUntil = Math.max(adzunaRateLimitedUntil, Date.now() + retryAfterSeconds * 1000);
+      throw new JobDiscoveryError(`Adzuna is rate limiting requests. Try again in about ${retryAfterSeconds} seconds.`, "JOB_SOURCE_RATE_LIMITED", { retryAfterSeconds });
+    }
     const detail = payload?.error || payload?.message || responseText.replace(/\s+/g, " ").trim();
     throw new JobDiscoveryError(`Adzuna returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 240)}` : "."}`, "JOB_SOURCE_REQUEST_FAILED");
   }
   return Array.isArray(payload.results) ? payload.results : [];
+}
+
+function searchRequests(queries, locations, resultsPerPage, limit = ADZUNA_MAX_REQUESTS) {
+  return queries.flatMap((query) => locations.map((location) => ({ query, location, resultsPerPage }))).slice(0, limit);
+}
+
+async function runSearchRequests(requests, credentials) {
+  const results = [];
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < requests.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const request = requests[index];
+      results[index] = await searchLocation({ ...credentials, ...request });
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(ADZUNA_REQUEST_CONCURRENCY, requests.length) }, worker));
+  return results.flat();
 }
 
 export async function discoverJobs(profile) {
@@ -215,13 +248,13 @@ export async function discoverJobs(profile) {
   const locations = allowedLocations(profile);
   const requestLocations = searchLocationVariants(locations);
   const requestedResults = Math.min(Number(process.env.JOB_SEARCH_RESULTS) || 20, 50);
-  const resultsPerRequest = Math.max(5, Math.ceil(requestedResults / Math.max(1, requestLocations.length * queries.length)));
+  const resultsPerRequest = Math.max(10, Math.ceil(requestedResults / Math.max(1, requestLocations.length * Math.min(queries.length, ADZUNA_MAX_REQUESTS))));
   let searchPlan = queries;
-  let rawJobs = (await Promise.all(searchPlan.flatMap((query) => requestLocations.map((location) => searchLocation({ appId, appKey, country, query, location, resultsPerPage: resultsPerRequest }))))).flat();
+  let rawJobs = await runSearchRequests(searchRequests(searchPlan, requestLocations, resultsPerRequest), { appId, appKey, country });
   if (!rawJobs.length) {
     searchPlan = broaderSearchQueries(profile, queries);
-    const fallbackResultsPerRequest = Math.max(10, Math.ceil(requestedResults / Math.max(1, requestLocations.length * searchPlan.length)));
-    rawJobs = (await Promise.all(searchPlan.flatMap((query) => requestLocations.map((location) => searchLocation({ appId, appKey, country, query, location, resultsPerPage: fallbackResultsPerRequest }))))).flat();
+    const fallbackResultsPerRequest = Math.max(10, Math.ceil(requestedResults / Math.max(1, requestLocations.length * Math.min(searchPlan.length, ADZUNA_MAX_REQUESTS))));
+    rawJobs = await runSearchRequests(searchRequests(searchPlan, requestLocations, fallbackResultsPerRequest), { appId, appKey, country });
   }
   const seen = new Set();
   const jobs = rawJobs.map((job) => {
