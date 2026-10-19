@@ -5,7 +5,7 @@ import JobMatch from "../models/JobMatch.js";
 import Application from "../models/Application.js";
 import User from "../models/User.js";
 import { authenticate } from "../middleware/authenticate.js";
-import { scoreJob } from "../services/aiMatching.js";
+import { scoreJob, scoreJobFallback } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
 import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isExpiredJob, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
 import { discoverCompanyCareerJobs, stripHtml } from "../services/companyCareerDiscovery.js";
@@ -19,7 +19,7 @@ const activeAdzunaDiscoveries = new Map();
 const MIN_CAREER_MATCH_SCORE = 60;
 // Bump this whenever matching rules change. Existing matches must be rescored
 // so an old overconfident AI result cannot remain in the suggestions feed.
-const CURRENT_MATCH_VERSIONS = new Set(["v8-gemini-specialty-guard"]);
+const CURRENT_MATCH_VERSIONS = new Set(["v9-gemini-budgeted"]);
 
 function discoverAdzunaOnce(userId, profile) {
   const key = String(userId);
@@ -69,6 +69,42 @@ async function scoreWithLimit(items, worker) {
   };
   await Promise.all(Array.from({ length: Math.min(SCORE_CONCURRENCY, items.length) }, runWorker));
   return results;
+}
+
+function hostedAiBudget(itemCount) {
+  const provider = String(process.env.AI_PROVIDER || "ollama").toLowerCase();
+  if (!['gemini', 'google'].includes(provider)) return itemCount;
+  return Math.min(itemCount, Math.max(0, Number(process.env.AI_DISCOVERY_AI_LIMIT) || 5));
+}
+
+async function evaluateJobsForUser({ userId, profile, jobs }) {
+  if (!jobs.length) return { aiScored: 0, aiFailures: 0 };
+  const ranked = jobs
+    .map((job) => ({ job, fallback: scoreJobFallback(profile, job) }))
+    .sort((left, right) => right.fallback.matchScore - left.fallback.matchScore);
+
+  // Persist a description-aware local score for every listing first. This
+  // keeps the feed useful even when Gemini's free quota is exhausted.
+  await Promise.all(ranked.map(({ job, fallback }) => JobMatch.findOneAndUpdate(
+    { user: userId, job: job._id },
+    { user: userId, job: job._id, ...fallback, evaluatedAt: new Date() },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  )));
+
+  const candidates = ranked.slice(0, hostedAiBudget(ranked.length));
+  const results = await scoreWithLimit(candidates, async ({ job }) => {
+    const result = await scoreJob(profile, job);
+    await JobMatch.findOneAndUpdate(
+      { user: userId, job: job._id },
+      { user: userId, job: job._id, ...result, evaluatedAt: new Date() },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+    return result;
+  });
+  return {
+    aiScored: results.filter((item) => item.status === "fulfilled" && !item.value.aiFallback).length,
+    aiFailures: results.filter((item) => item.status === "rejected" || item.value?.aiFallback).length,
+  };
 }
 
 const jobInput = z.object({
@@ -169,17 +205,10 @@ router.get("/", authenticate, async (req, res) => {
       const profileUpdated = match && req.user.updatedAt && new Date(match.updatedAt) < new Date(req.user.updatedAt);
       return !match || !CURRENT_MATCH_VERSIONS.has(match.scoringVersion) || profileUpdated;
     }).slice(0, 5);
-    const rescored = await scoreWithLimit(needsScoring, async (job) => {
-      const result = await scoreJob(profile, job);
-      await JobMatch.findOneAndUpdate(
-        { user: req.user._id, job: job._id },
-        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
-        { upsert: true, new: true, setDefaultsOnInsert: true },
-      );
-      return { jobId: job._id.toString(), ...result };
-    });
-    for (const result of rescored) {
-      if (result.status === "fulfilled") matchByJobId.set(result.value.jobId, result.value);
+    if (needsScoring.length) await evaluateJobsForUser({ userId: req.user._id, profile, jobs: needsScoring });
+    if (needsScoring.length) {
+      const refreshedMatches = await JobMatch.find({ user: req.user._id, job: { $in: needsScoring.map((job) => job._id) } }).lean();
+      refreshedMatches.forEach((match) => matchByJobId.set(match.job.toString(), match));
     }
     return res.json({ success: true, jobs: displayJobs.map((job) => {
       const match = matchByJobId.get(job._id.toString());
@@ -230,17 +259,10 @@ router.get("/suggestions", authenticate, async (req, res) => {
       const match = matchByJobId.get(job._id.toString());
       return !match || !CURRENT_MATCH_VERSIONS.has(match.scoringVersion);
     }).slice(0, 24);
-    const rescored = await scoreWithLimit(needsScoring, async (job) => {
-      const result = await scoreJob(profile, job);
-      const saved = await JobMatch.findOneAndUpdate(
-        { user: req.user._id, job: job._id },
-        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
-        { upsert: true, new: true, setDefaultsOnInsert: true },
-      ).lean();
-      return saved;
-    });
-    for (const result of rescored) {
-      if (result.status === "fulfilled") matchByJobId.set(result.value.job.toString(), result.value);
+    if (needsScoring.length) await evaluateJobsForUser({ userId: req.user._id, profile, jobs: needsScoring });
+    if (needsScoring.length) {
+      const refreshedMatches = await JobMatch.find({ user: req.user._id, job: { $in: needsScoring.map((job) => job._id) } }).lean();
+      refreshedMatches.forEach((match) => matchByJobId.set(match.job.toString(), match));
     }
     const qualityMatches = jobs
       .filter((job) => !submittedJobIds.has(job._id.toString()) && isQualityJob(job))
@@ -351,18 +373,7 @@ router.post("/discover", authenticate, async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
 
-    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || 50, savedJobs.length);
-    const scoreResults = await scoreWithLimit(savedJobs.slice(0, scoreLimit), async (job) => {
-      const result = await scoreJob(profile, job);
-      await JobMatch.findOneAndUpdate(
-        { user: req.user._id, job: job._id },
-        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
-        { upsert: true, new: true, setDefaultsOnInsert: true },
-      );
-      return result;
-    });
-    const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
-    const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
+    const { aiScored, aiFailures } = await evaluateJobsForUser({ userId: req.user._id, profile, jobs: savedJobs });
     const message = savedJobs.length === 0
       ? discovery.rawCount === 0
         ? "Adzuna returned no listings for the current role, skill, country, and location search. Credentials were accepted; try broader profile roles or another location."
@@ -404,20 +415,7 @@ router.post("/discover-careers", authenticate, async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
 
-    // Score every career listing returned (up to COMPANY_CAREER_JOB_LIMIT),
-    // so valid matches later in a feed are not silently left unevaluated.
-    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || savedJobs.length, savedJobs.length);
-    const scoreResults = await scoreWithLimit(savedJobs.slice(0, scoreLimit), async (job) => {
-      const result = await scoreJob(profile, job);
-      await JobMatch.findOneAndUpdate(
-        { user: req.user._id, job: job._id },
-        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
-        { upsert: true, new: true, setDefaultsOnInsert: true },
-      );
-      return result;
-    });
-    const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
-    const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
+    const { aiScored, aiFailures } = await evaluateJobsForUser({ userId: req.user._id, profile, jobs: savedJobs });
     const activeSources = discovery.sourceDetails.filter((source) => source.returned > 0).length;
     const unreadableSources = discovery.sourceDetails.filter((source) => source.status === "rejected" || source.fetched === 0).length;
     return res.json({
@@ -455,12 +453,8 @@ router.post("/import", authenticate, async (req, res) => {
       { $set: { ...job, fetchedAt: new Date(), status: "open", sourceUrl: job.sourceUrl || job.applicationUrl }, $setOnInsert: { createdBy: req.user._id } },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     ).lean()));
-    const scoreLimit = Math.min(Number(process.env.AI_DISCOVERY_SCORE_LIMIT) || 50, savedJobs.length);
-    const scores = await scoreWithLimit(savedJobs.slice(0, scoreLimit), async (job) => {
-      const result = await scoreJob(profile, job);
-      await JobMatch.findOneAndUpdate({ user: req.user._id, job: job._id }, { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() }, { upsert: true, new: true, setDefaultsOnInsert: true });
-    });
-    return res.json({ success: true, imported: savedJobs.length, aiScored: scores.filter((result) => result.status === "fulfilled").length, aiFailures: scores.filter((result) => result.status === "rejected").length });
+    const { aiScored, aiFailures } = await evaluateJobsForUser({ userId: req.user._id, profile, jobs: savedJobs });
+    return res.json({ success: true, imported: savedJobs.length, aiScored, aiFailures });
   } catch (error) {
     console.error("Local job import failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to import local jobs." });

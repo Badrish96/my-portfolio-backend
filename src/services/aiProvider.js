@@ -2,7 +2,7 @@ import ollama from "ollama";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b";
-const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
 // A 429 from Groq is a quota state, not a transient network failure. Retrying
 // every career listing multiplies the delay and keeps the dashboard request
@@ -163,11 +163,15 @@ function createGeminiProvider(modelOverride) {
           geminiRateLimitedUntil = Date.now() + cooldownMs;
           console.warn(`Gemini rate limit reached; disabling Gemini calls for ${Math.ceil(cooldownMs / 60_000)} minute(s) and using fallback matching.`);
         }
+        if (response.status >= 500) {
+          geminiRateLimitedUntil = Math.max(geminiRateLimitedUntil, Date.now() + 60_000);
+          console.warn("Gemini is temporarily unavailable; disabling Gemini calls for 1 minute and using fallback matching.");
+        }
         const message = response.status === 404
           ? `Gemini model "${model}" was not found. Set GEMINI_MODEL to a currently available model.`
           : `Gemini request failed (${response.status}).`;
         console.error("Gemini request failed:", { status: response.status, model, detail: detail.slice(0, 500) });
-        throw new AIProviderError(message, { code: response.status === 429 ? "AI_RATE_LIMITED" : "AI_REQUEST_FAILED", retryable: response.status === 429 || response.status >= 500, cause: detail });
+        throw new AIProviderError(message, { code: response.status === 429 ? "AI_RATE_LIMITED" : response.status >= 500 ? "AI_UNAVAILABLE" : "AI_REQUEST_FAILED", retryable: response.status === 429 || response.status >= 500, cause: detail });
       } catch (error) {
         if (error instanceof AIProviderError) throw error;
         throw new AIProviderError("The Gemini provider is unavailable.", { code: "AI_UNAVAILABLE", retryable: true, cause: error });

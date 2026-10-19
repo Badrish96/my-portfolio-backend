@@ -37,7 +37,7 @@ function configuredModels() {
   const defaultModel = (process.env.AI_PROVIDER || "ollama").toLowerCase() === "groq"
     ? (process.env.GROQ_MODEL || "openai/gpt-oss-20b")
     : ["gemini", "google"].includes((process.env.AI_PROVIDER || "ollama").toLowerCase())
-      ? (process.env.GEMINI_MODEL || "gemini-3.6-flash")
+      ? (process.env.GEMINI_MODEL || "gemini-3.5-flash-lite")
     : (process.env.OLLAMA_MODEL || "qwen2.5:3b");
   return [...new Set(configured.length ? configured : [defaultModel])];
 }
@@ -208,10 +208,14 @@ function fallbackMatch(profile, job, metadata = {}) {
     concerns: missingSkills.length ? [`Missing or unconfirmed skills: ${missingSkills.join(", ")}.`] : [],
     salaryCompatibility: "unknown",
     provider: "heuristic-fallback",
-    scoringVersion: "v8-gemini-specialty-guard",
+    scoringVersion: "v9-gemini-budgeted",
     aiFallback: true,
     ...metadata,
   };
+}
+
+export function scoreJobFallback(profile, job) {
+  return applyRelevanceGuard(profile, job, fallbackMatch(profile, job, { modelsUsed: [], agreement: 0 }));
 }
 
 async function scoreWithModel(profile, job, model) {
@@ -246,7 +250,7 @@ async function scoreWithModel(profile, job, model) {
     normalizeMatchResult,
   );
 
-  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v8-gemini-specialty-guard" };
+  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v9-gemini-budgeted" };
 }
 
 function median(values) {
@@ -275,7 +279,7 @@ function mergeModelResults(profile, job, results) {
     concerns: [...new Set(results.flatMap((result) => result.concerns))].slice(0, 5),
     salaryCompatibility: mostCommon(results.map((result) => result.salaryCompatibility), "unknown"),
     provider: "ensemble",
-    scoringVersion: "v8-gemini-specialty-guard",
+    scoringVersion: "v9-gemini-budgeted",
     modelsUsed: results.map((result) => result.model),
     agreement,
     modelResults: results.map(({ model, provider, matchScore, recommendation, matchingSkills, missingSkills }) => ({ model, provider, matchScore, recommendation, matchingSkills, missingSkills })),
@@ -294,6 +298,6 @@ export async function scoreJob(profile, job) {
     throw new Error("All configured AI ensemble models failed.");
   } catch (error) {
     console.error("AI job match response was invalid; using fallback matcher:", error.message);
-    return applyRelevanceGuard(profile, job, fallbackMatch(profile, job, { modelsUsed: [], agreement: 0 }));
+    return scoreJobFallback(profile, job);
   }
 }
