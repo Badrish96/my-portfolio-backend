@@ -3,6 +3,9 @@ import { deduplicateJobs, isAllowedJobLocation, isQualityJob, normalizeJobText }
 import { extractSkills } from "./skillMatching.js";
 
 const DEFAULT_LIMIT = 100;
+const CAREER_PAGE_TIMEOUT_MS = 10_000;
+const JOB_DETAIL_TIMEOUT_MS = 7_000;
+const MAX_HTML_JOB_LINKS = 12;
 const DEFAULT_COMPANIES = JSON.parse(readFileSync(new URL("../config/companyCareerSources.json", import.meta.url), "utf8").replace(/^\uFEFF/, ""));
 export const DEFAULT_RECRUITER_MESSAGE = "Hello, I’m interested in this opportunity and would welcome the chance to discuss how my experience could contribute to your team. Thank you for your consideration.";
 const CAREER_PAGE_HEADERS = {
@@ -101,7 +104,7 @@ function normalizeJob(company, raw, fields) {
 }
 
 async function getJson(url) {
-  const response = await fetch(url, { headers: { ...CAREER_PAGE_HEADERS, Accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+  const response = await fetch(url, { headers: { ...CAREER_PAGE_HEADERS, Accept: "application/json" }, signal: AbortSignal.timeout(CAREER_PAGE_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`Career source returned HTTP ${response.status}.`);
   return response.json();
 }
@@ -163,19 +166,78 @@ async function smartRecruitersJobs(company) {
 }
 
 function linkedAtsSource(company, html) {
-  const greenhouse = html.match(/https?:\/\/(?:boards|job-boards)\.greenhouse\.io\/([^/?#"'\\]+)/i)?.[1];
+  const normalized = String(html || "").replace(/\\\//g, "/").replace(/&amp;/g, "&");
+  const greenhouse = normalized.match(/(?:https?:)?\/\/(?:boards|job-boards)\.greenhouse\.io\/([^/?#"'\\]+)/i)?.[1];
   if (greenhouse) return { ...company, ats: "greenhouse", board: greenhouse, careersUrl: `https://job-boards.greenhouse.io/${greenhouse}` };
-  const lever = html.match(/https?:\/\/jobs\.lever\.co\/([^/?#"'\\]+)/i)?.[1];
+  const lever = normalized.match(/(?:https?:)?\/\/jobs\.lever\.co\/([^/?#"'\\]+)/i)?.[1];
   if (lever) return { ...company, ats: "lever", board: lever, careersUrl: `https://jobs.lever.co/${lever}` };
-  const ashby = html.match(/https?:\/\/jobs\.ashbyhq\.com\/([^/?#"'\\]+)/i)?.[1];
+  const ashby = normalized.match(/(?:https?:)?\/\/jobs\.ashbyhq\.com\/([^/?#"'\\]+)/i)?.[1];
   if (ashby) return { ...company, ats: "ashby", board: ashby, careersUrl: `https://jobs.ashbyhq.com/${ashby}` };
-  const smartRecruiters = html.match(/https?:\/\/jobs\.smartrecruiters\.com\/([^/?#"'\\]+)/i)?.[1];
+  const smartRecruiters = normalized.match(/(?:https?:)?\/\/jobs\.smartrecruiters\.com\/([^/?#"'\\]+)/i)?.[1];
   if (smartRecruiters) return { ...company, ats: "smartrecruiters", board: smartRecruiters, careersUrl: `https://jobs.smartrecruiters.com/${smartRecruiters}` };
   return null;
 }
 
+function annotateJobs(jobs, sourceType, sourceUrl) {
+  const result = Array.isArray(jobs) ? jobs : [];
+  result.sourceMeta = { sourceType, sourceUrl };
+  return result;
+}
+
+function htmlJobLinks(html, baseUrl) {
+  const links = [];
+  for (const [, rawHref, rawText] of String(html || "").matchAll(/<a\b[^>]*?href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    const href = absoluteUrl(decodeHtmlEntities(rawHref), baseUrl);
+    const text = stripHtml(rawText);
+    if (!href || !text || text.length < 4 || text.length > 180) continue;
+    try {
+      const url = new URL(href);
+      if (url.origin !== new URL(baseUrl).origin) continue;
+      if (!/(?:job|position|opening|vacanc|requisition|career-opportunit)/i.test(`${url.pathname} ${url.search}`)) continue;
+      if (url.href.replace(/\/$/, "") === baseUrl.replace(/\/$/, "")) continue;
+      links.push({ url: url.toString(), text });
+    } catch {
+      // Ignore malformed links.
+    }
+  }
+  return links.filter((item, index, all) => all.findIndex((candidate) => candidate.url === item.url) === index).slice(0, MAX_HTML_JOB_LINKS);
+}
+
+function pageField(html, pattern) {
+  return html.match(pattern)?.[1] || "";
+}
+
+function inferCareerLocation(html) {
+  const text = stripHtml(html).slice(0, 20_000);
+  return ["Bengaluru", "Bangalore", "Gurugram", "Gurgaon", "Noida", "Delhi NCR", "Hyderabad", "Pune", "Mumbai", "Chennai", "Remote"]
+    .find((location) => new RegExp(`\\b${location.replace(" ", "\\s+")}\\b`, "i").test(text)) || "";
+}
+
+async function htmlLinkedJobs(company, html) {
+  const links = htmlJobLinks(html, company.careersUrl);
+  const details = await Promise.allSettled(links.map(async ({ url, text }) => {
+    const response = await fetch(url, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(JOB_DETAIL_TIMEOUT_MS) });
+    if (!response.ok) throw new Error(`Career job page returned HTTP ${response.status}.`);
+    const detailHtml = await response.text();
+    const structured = jsonLdJobPostings(detailHtml, company, url);
+    if (structured.length) return structured[0];
+    const title = stripHtml(pageField(detailHtml, /<h1[^>]*>([\s\S]*?)<\/h1>/i)
+      || pageField(detailHtml, /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i)
+      || pageField(detailHtml, /<title[^>]*>([\s\S]*?)<\/title>/i)
+      || text).trim();
+    const description = stripHtml(pageField(detailHtml, /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)/i)
+      || pageField(detailHtml, /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)/i)
+      || pageField(detailHtml, /<(?:main|article|section)[^>]*>([\s\S]*?)<\/(?:main|article|section)>/i));
+    const location = pageField(detailHtml, /<meta[^>]+(?:name|property)=["'](?:jobLocation|location)["'][^>]+content=["']([^"']+)/i)
+      || inferCareerLocation(`${title} ${description}`);
+    if (!title || !description) return null;
+    return normalizeJob(company, null, { externalId: url, title, location, description, applicationUrl: url });
+  }));
+  return annotateJobs(details.filter((result) => result.status === "fulfilled" && result.value).map((result) => result.value), "html-links", company.careersUrl);
+}
+
 async function jsonLdJobs(company) {
-  const response = await fetch(company.careersUrl, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(20_000) });
+  const response = await fetch(company.careersUrl, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(CAREER_PAGE_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`Career page returned HTTP ${response.status}.`);
   const html = await response.text();
   const scripts = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
@@ -202,8 +264,9 @@ async function jsonLdJobs(company) {
   if (!jobs.length) {
     const atsSource = linkedAtsSource(company, html);
     if (atsSource) return fetchCompanyJobs(atsSource);
+    return htmlLinkedJobs(company, html);
   }
-  return jobs;
+  return annotateJobs(jobs, "jsonld", company.careersUrl);
 }
 
 function jsonLdJobPostings(html, company, baseUrl) {
@@ -232,7 +295,7 @@ function jsonLdJobPostings(html, company, baseUrl) {
 }
 
 async function ciscoJobs(company) {
-  const response = await fetch(company.careersUrl, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(20_000) });
+  const response = await fetch(company.careersUrl, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(CAREER_PAGE_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`Cisco careers returned HTTP ${response.status}.`);
   const html = (await response.text()).replace(/\\\//g, "/").replace(/&amp;/g, "&");
   const jobs = jsonLdJobPostings(html, company, company.careersUrl);
@@ -242,7 +305,7 @@ async function ciscoJobs(company) {
     .slice(0, 100);
   const details = await Promise.allSettled(jobPaths.map(async (path) => {
     const url = absoluteUrl(path, company.careersUrl);
-    const detailResponse = await fetch(url, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(20_000) });
+    const detailResponse = await fetch(url, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(JOB_DETAIL_TIMEOUT_MS) });
     if (!detailResponse.ok) throw new Error(`Cisco job page returned HTTP ${detailResponse.status}.`);
     const detailHtml = (await detailResponse.text()).replace(/\\\//g, "/");
     const structured = jsonLdJobPostings(detailHtml, company, url);
@@ -260,15 +323,15 @@ async function ciscoJobs(company) {
     const id = url.match(/\/job\/([^/]+)/i)?.[1] || url;
     return normalizeJob(company, null, { externalId: id, title: cleanTitle, description: cleanDescription, applicationUrl: url });
   }));
-  return [...jobs, ...details.filter((item) => item.status === "fulfilled" && item.value).map((item) => item.value)];
+  return annotateJobs([...jobs, ...details.filter((item) => item.status === "fulfilled" && item.value).map((item) => item.value)], "cisco", company.careersUrl);
 }
 
 async function fetchCompanyJobs(company) {
   if (company.ats === "cisco") return ciscoJobs(company);
-  if (company.ats === "greenhouse") return greenhouseJobs(company);
-  if (company.ats === "lever") return leverJobs(company);
-  if (company.ats === "ashby") return ashbyJobs(company);
-  if (company.ats === "smartrecruiters") return smartRecruitersJobs(company);
+  if (company.ats === "greenhouse") return greenhouseJobs(company).then((jobs) => annotateJobs(jobs, "greenhouse", company.careersUrl));
+  if (company.ats === "lever") return leverJobs(company).then((jobs) => annotateJobs(jobs, "lever", company.careersUrl));
+  if (company.ats === "ashby") return ashbyJobs(company).then((jobs) => annotateJobs(jobs, "ashby", company.careersUrl));
+  if (company.ats === "smartrecruiters") return smartRecruitersJobs(company).then((jobs) => annotateJobs(jobs, "smartrecruiters", company.careersUrl));
   return jsonLdJobs(company);
 }
 
@@ -297,15 +360,18 @@ export async function discoverCompanyCareerJobs(profile) {
   const results = await Promise.allSettled(companies.map(fetchCompanyJobs));
   const companyResults = results.map((result, index) => {
     const fetchedJobs = result.status === "fulfilled" ? result.value : [];
+    const sourceMeta = result.status === "fulfilled" ? result.value.sourceMeta || {} : {};
     const acceptedJobs = fetchedJobs.filter((job) => isAllowedJobLocation(job.location, profile.preferredLocations) && isQualityJob(job));
-    return { company: companies[index], result, fetchedJobs, acceptedJobs };
+    return { company: companies[index], result, fetchedJobs, acceptedJobs, sourceMeta };
   });
   const jobs = companyResults.flatMap(({ acceptedJobs }) => acceptedJobs);
   const failures = results.filter((result) => result.status === "rejected").length;
   const balancedJobs = balanceCompanies(deduplicateJobs(jobs), limit);
   const returnedIds = new Set(balancedJobs.map((job) => `${job.company}::${job.externalId}`));
-  const sourceDetails = companyResults.map(({ company, result, fetchedJobs, acceptedJobs }) => ({
+  const sourceDetails = companyResults.map(({ company, result, fetchedJobs, acceptedJobs, sourceMeta }) => ({
     company: company.company,
+    sourceType: sourceMeta.sourceType || company.ats || "unknown",
+    sourceUrl: sourceMeta.sourceUrl || company.careersUrl,
     status: result.status,
     fetched: fetchedJobs.length,
     jobs: acceptedJobs.length,
