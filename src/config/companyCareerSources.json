@@ -45,6 +45,11 @@
         "careersUrl":  "https://careers.cognizant.com/"
     },
     {
+        "company":  "Concentrix",
+        "ats":  "jsonld",
+        "careersUrl":  "https://jobs.concentrix.com/job-search/?country=India"
+    },
+    {
         "company":  "Accenture India",
         "ats":  "jsonld",
         "careersUrl":  "https://www.accenture.com/in-en/careers"
