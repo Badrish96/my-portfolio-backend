@@ -64,7 +64,9 @@ function applyRelevanceGuard(profile, job, result) {
   const normalizedText = jobText.toLowerCase();
   const roleHit = (profile.preferredRoles || []).some((role) => {
     const words = String(role).toLowerCase().match(/[a-z0-9+#.]{2,}/g) || [];
-    return words.length > 0 && words.filter((word) => normalizedText.includes(word)).length >= Math.max(1, Math.ceil(words.length * 0.6));
+    const equivalent = { developer: ["developer", "engineer", "programmer"], engineer: ["engineer", "developer", "programmer"], frontend: ["frontend", "front-end", "ui"], "full-stack": ["full-stack", "full stack"] };
+    const hits = words.filter((word) => (equivalent[word] || [word]).some((candidate) => normalizedText.includes(candidate)));
+    return words.length > 0 && hits.length >= Math.max(1, Math.ceil(words.length * 0.6));
   });
   // Model-only scores can be overconfident when a listing contains generic
   // words such as "engineer" or "software". Require profile evidence before

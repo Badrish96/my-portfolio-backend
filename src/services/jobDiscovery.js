@@ -58,7 +58,7 @@ export function isAllowedJobLocation(location, preferredLocations = DEFAULT_JOB_
   const requested = Array.isArray(preferredLocations) && preferredLocations.length ? preferredLocations : DEFAULT_JOB_LOCATIONS;
   return requested.some((preference) => {
     const key = normalizeJobText(preference);
-    const aliases = LOCATION_ALIASES[key] || [key];
+    const aliases = LOCATION_ALIASES[key] || Object.values(LOCATION_ALIASES).find((values) => values.includes(key)) || [key];
     return aliases.some((alias) => new RegExp(`\\b${normalizeJobText(alias).replace(/ /g, "\\s+")}\\b`, "i").test(normalized));
   });
 }
