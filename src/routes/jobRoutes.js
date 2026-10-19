@@ -204,14 +204,43 @@ router.get("/summary", authenticate, async (req, res) => {
 
 router.get("/suggestions", authenticate, async (req, res) => {
   try {
-    const [matches, submittedJobIds] = await Promise.all([
-      JobMatch.find({ user: req.user._id }).sort({ matchScore: -1, updatedAt: -1 }).limit(120).populate("job").lean(),
+    const [jobs, submittedJobIds, matches] = await Promise.all([
+      getVisibleOpenJobs(req.user._id, 300),
       getSubmittedJobIds(req.user._id),
+      JobMatch.find({ user: req.user._id }).lean(),
     ]);
-    const qualityMatches = matches.filter((item) => item.job?.status === "open" && !submittedJobIds.has(item.job._id.toString()) && isAllowedJobLocation(item.job.location, req.user.preferredLocations) && isQualityJob(item.job) && item.matchScore >= MIN_CAREER_MATCH_SCORE && item.recommendation !== "skip");
-    const uniqueJobs = deduplicateJobs(qualityMatches.map((item) => item.job));
+    const matchByJobId = new Map(matches.map((match) => [match.job.toString(), match]));
+    const profile = getCandidateProfile(req.user);
+    // A failed model call or a newly imported board listing must not make the
+    // suggestions page empty forever. Evaluate missing/stale matches on demand.
+    const needsScoring = jobs.filter((job) => {
+      const match = matchByJobId.get(job._id.toString());
+      return !match || !CURRENT_MATCH_VERSIONS.has(match.scoringVersion);
+    }).slice(0, 24);
+    const rescored = await scoreWithLimit(needsScoring, async (job) => {
+      const result = await scoreJob(profile, job);
+      const saved = await JobMatch.findOneAndUpdate(
+        { user: req.user._id, job: job._id },
+        { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      ).lean();
+      return saved;
+    });
+    for (const result of rescored) {
+      if (result.status === "fulfilled") matchByJobId.set(result.value.job.toString(), result.value);
+    }
+    const qualityMatches = jobs
+      .filter((job) => !submittedJobIds.has(job._id.toString()) && isQualityJob(job))
+      .map((job) => ({ job, match: matchByJobId.get(job._id.toString()) }))
+      .filter(({ match }) => match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip")
+      .sort((left, right) => {
+        const scoreDelta = (right.match.matchScore || 0) - (left.match.matchScore || 0);
+        if (scoreDelta) return scoreDelta;
+        return new Date(right.job.postedAt || right.job.fetchedAt || right.job.createdAt || 0) - new Date(left.job.postedAt || left.job.fetchedAt || left.job.createdAt || 0);
+      });
+    const uniqueJobs = deduplicateJobs(qualityMatches.map(({ job }) => job));
     const uniqueIds = new Set(uniqueJobs.map((job) => job._id.toString()));
-    return res.json({ success: true, suggestions: qualityMatches.filter((item) => uniqueIds.has(item.job._id.toString())).slice(0, 20).map((item) => serializeJob(item.job, {
+    return res.json({ success: true, suggestions: qualityMatches.filter(({ job }) => uniqueIds.has(job._id.toString())).slice(0, 20).map(({ job, match: item }) => serializeJob(job, {
       matchScore: item.matchScore,
       recommendation: item.recommendation,
       matchingSkills: item.matchingSkills,

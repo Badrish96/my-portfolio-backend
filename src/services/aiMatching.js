@@ -58,6 +58,28 @@ function recommendationForScore(score) {
   return "skip";
 }
 
+function applyRelevanceGuard(profile, job, result) {
+  const jobText = `${job.title || ""} ${job.description || ""}`;
+  const skillResult = matchSkills(profile.verifiedSkills || [], job.requiredSkills || [], jobText);
+  const normalizedText = jobText.toLowerCase();
+  const roleHit = (profile.preferredRoles || []).some((role) => {
+    const words = String(role).toLowerCase().match(/[a-z0-9+#.]{2,}/g) || [];
+    return words.length > 0 && words.filter((word) => normalizedText.includes(word)).length >= Math.max(1, Math.ceil(words.length * 0.6));
+  });
+  // Model-only scores can be overconfident when a listing contains generic
+  // words such as "engineer" or "software". Require profile evidence before
+  // allowing a job into the recommendation feed.
+  if (!skillResult.matching.length && !roleHit) {
+    return {
+      ...result,
+      matchScore: Math.min(Number(result.matchScore) || 0, 29),
+      recommendation: "skip",
+      concerns: [...new Set([...(result.concerns || []), "No preferred role or verified skill was found in the listing."])],
+    };
+  }
+  return { ...result, recommendation: recommendationForScore(Number(result.matchScore) || 0) };
+}
+
 function fallbackMatch(profile, job, metadata = {}) {
   const profileEvidence = [profile.resumeSummary, profile.experienceDetails, profile.projectDetails, profile.certifications].filter(Boolean).join(" ");
   const profileSkills = [...new Set([
@@ -168,14 +190,14 @@ export async function scoreJob(profile, job) {
   const models = configuredModels();
   const ensembleEnabled = String(process.env.AI_ENSEMBLE_ENABLED || "false").toLowerCase() === "true" && models.length > 1;
   try {
-    if (!ensembleEnabled) return await scoreWithModel(profile, job, models[0]);
+    if (!ensembleEnabled) return applyRelevanceGuard(profile, job, await scoreWithModel(profile, job, models[0]));
 
     const results = await Promise.allSettled(models.map((model) => scoreWithModel(profile, job, model)));
     const successful = results.filter((result) => result.status === "fulfilled").map((result) => result.value);
-    if (successful.length) return mergeModelResults(profile, job, successful);
+    if (successful.length) return applyRelevanceGuard(profile, job, mergeModelResults(profile, job, successful));
     throw new Error("All configured AI ensemble models failed.");
   } catch (error) {
     console.error("AI job match response was invalid; using fallback matcher:", error.message);
-    return fallbackMatch(profile, job, { modelsUsed: [], agreement: 0 });
+    return applyRelevanceGuard(profile, job, fallbackMatch(profile, job, { modelsUsed: [], agreement: 0 }));
   }
 }
