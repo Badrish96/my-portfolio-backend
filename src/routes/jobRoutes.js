@@ -18,7 +18,7 @@ const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURR
 const MIN_CAREER_MATCH_SCORE = 60;
 // Bump this whenever matching rules change. Existing matches must be rescored
 // so an old overconfident AI result cannot remain in the suggestions feed.
-const CURRENT_MATCH_VERSIONS = new Set(["v5-role-family-evidence"]);
+const CURRENT_MATCH_VERSIONS = new Set(["v6-specialty-language-guard"]);
 
 async function getVisibleOpenJobs(userId, limit = 500) {
   const user = await User.findById(userId).select("preferredLocations").lean();
@@ -354,7 +354,9 @@ router.post("/discover", authenticate, async (req, res) => {
     const aiScored = scoreResults.filter((result) => result.status === "fulfilled").length;
     const aiFailures = scoreResults.filter((result) => result.status === "rejected").length;
     const message = savedJobs.length === 0
-      ? "No usable jobs were returned by the job source. Check the search country, profile roles or skills, and Adzuna credentials."
+      ? discovery.rawCount === 0
+        ? "Adzuna returned no listings for the current role, skill, country, and location search. Credentials were accepted; try broader profile roles or another location."
+        : `Adzuna returned ${discovery.rawCount} listings, but none matched your selected locations or passed source validation.`
       : aiFailures
         ? "Jobs were imported, but some AI scores could not be calculated."
         : "Jobs discovered and scored successfully.";

@@ -60,18 +60,68 @@ function recommendationForScore(score) {
 
 function roleFamilyForMatch(value) {
   const text = String(value || "").toLowerCase().replace(/[._-]/g, " ");
-  if (/front\s*end|ui|web\s*client/.test(text)) return "frontend";
-  if (/back\s*end|server\s*side|api/.test(text)) return "backend";
+  if (/qa|quality assurance|test(?:ing| engineer)|sdet|quality automation/.test(text)) return "qa";
+  if (/devops|site reliability|\bsre\b|cloud engineer|release engineer/.test(text)) return "devops";
+  if (/front\s*end|ui|web\s*client|angular|react developer/.test(text)) return "frontend";
+  if (/back\s*end|server\s*side|api engineer|java engineer|\.net|node(?:\.js)? developer/.test(text)) return "backend";
   if (/full\s*stack|fullstack/.test(text)) return "fullstack";
-  if (/data|etl|analytics|bi/.test(text)) return "data";
+  if (/data engineer|data scientist|etl|analytics|business intelligence|\bbi\b/.test(text)) return "data";
   if (/mobile|ios|android/.test(text)) return "mobile";
   if (/(software|web|application|platform).*(developer|engineer|programmer)|(developer|engineer|programmer)/.test(text)) return "software";
   return "other";
 }
 
+function titleLanguage(value) {
+  const text = String(value || "").toLowerCase().replace(/[._-]/g, " ");
+  return [
+    ["java", /\bjava\b/],
+    ["c#", /(?:\bc#\b|\.net|dotnet)/],
+    ["python", /\bpython\b/],
+    ["go", /\b(?:golang|go)\b/],
+    ["ruby", /\bruby\b/],
+    ["php", /\bphp\b/],
+  ].find(([, pattern]) => pattern.test(text))?.[0] || "";
+}
+
+function roleCompatibility(profile, job) {
+  const title = String(job.title || "");
+  const titleFamily = roleFamilyForMatch(title);
+  const preferredRoles = profile.preferredRoles || [];
+  const preferredFamilies = new Set(preferredRoles.map(roleFamilyForMatch));
+  const language = titleLanguage(title);
+  const candidateText = `${preferredRoles.join(" ")} ${(profile.verifiedSkills || []).join(" ")} ${profile.resumeSummary || ""}`.toLowerCase();
+  if (language && !new RegExp(`(?:^|[^a-z+#])${language.replace("#", "\\#")}(?:$|[^a-z])`, "i").test(candidateText)) {
+    return { compatible: false, reason: `The listing requires ${language}, which is not present in the candidate profile.` };
+  }
+  if (["qa", "data", "devops", "mobile"].includes(titleFamily) && !preferredFamilies.has(titleFamily)) {
+    const evidence = {
+      qa: /selenium|cypress|playwright|appium|test automation|quality assurance|sdet/i,
+      data: /data engineer|data scientist|etl|spark|pyspark|airflow|snowflake|databricks/i,
+      devops: /devops|site reliability|\bsre\b|terraform|jenkins|kubernetes administrator/i,
+      mobile: /react native|android|ios|swift|kotlin|flutter/i,
+    }[titleFamily];
+    if (!evidence?.test(candidateText)) return { compatible: false, reason: `The listing is a ${titleFamily} role outside the candidate's preferred role families.` };
+  }
+  const familyCompatible = titleFamily === "other"
+    || preferredFamilies.has(titleFamily)
+    || (titleFamily === "frontend" && preferredFamilies.has("fullstack"))
+    || (titleFamily === "backend" && preferredFamilies.has("fullstack"))
+    || (titleFamily === "software" && preferredFamilies.has("software"));
+  return { compatible: familyCompatible, titleFamily };
+}
+
 export function applyRelevanceGuard(profile, job, result) {
   const jobText = `${job.title || ""} ${job.description || ""}`;
   const skillResult = matchSkills(profile.verifiedSkills || [], job.requiredSkills || [], jobText);
+  const compatibility = roleCompatibility(profile, job);
+  if (!compatibility.compatible) {
+    return {
+      ...result,
+      matchScore: Math.min(Number(result.matchScore) || 0, 29),
+      recommendation: "skip",
+      concerns: [...new Set([...(result.concerns || []), compatibility.reason || "The role specialty does not match the candidate profile."])],
+    };
+  }
   const normalizedTitle = String(job.title || "").toLowerCase();
   const jobFamily = roleFamilyForMatch(normalizedTitle);
   const roleHit = (profile.preferredRoles || []).some((role) => {
@@ -138,7 +188,7 @@ function fallbackMatch(profile, job, metadata = {}) {
     concerns: missingSkills.length ? [`Missing or unconfirmed skills: ${missingSkills.join(", ")}.`] : [],
     salaryCompatibility: "unknown",
     provider: "heuristic-fallback",
-    scoringVersion: "v5-role-family-evidence",
+    scoringVersion: "v6-specialty-language-guard",
     aiFallback: true,
     ...metadata,
   };
@@ -176,7 +226,7 @@ async function scoreWithModel(profile, job, model) {
     normalizeMatchResult,
   );
 
-  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v5-role-family-evidence" };
+  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v6-specialty-language-guard" };
 }
 
 function median(values) {
@@ -205,7 +255,7 @@ function mergeModelResults(profile, job, results) {
     concerns: [...new Set(results.flatMap((result) => result.concerns))].slice(0, 5),
     salaryCompatibility: mostCommon(results.map((result) => result.salaryCompatibility), "unknown"),
     provider: "ensemble",
-    scoringVersion: "v5-role-family-evidence",
+    scoringVersion: "v6-specialty-language-guard",
     modelsUsed: results.map((result) => result.model),
     agreement,
     modelResults: results.map(({ model, provider, matchScore, recommendation, matchingSkills, missingSkills }) => ({ model, provider, matchScore, recommendation, matchingSkills, missingSkills })),

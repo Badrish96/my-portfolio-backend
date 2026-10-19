@@ -53,6 +53,39 @@ function allowedLocations(profile) {
   return configured.length ? configured : DEFAULT_JOB_LOCATIONS;
 }
 
+function searchLocationVariants(locations) {
+  const variants = new Set(locations);
+  for (const location of locations) {
+    const key = normalizeJobText(location);
+    if (key === "gurugram" || key === "gurgaon") {
+      variants.add("Gurugram");
+      variants.add("Gurgaon");
+    }
+    if (key === "bangalore" || key === "bengaluru") {
+      variants.add("Bangalore");
+      variants.add("Bengaluru");
+    }
+    if (key === "delhi ncr") {
+      variants.add("Delhi");
+      variants.add("New Delhi");
+    }
+  }
+  return [...variants];
+}
+
+function broaderSearchQueries(profile, queries) {
+  const skills = Array.isArray(profile.verifiedSkills) ? profile.verifiedSkills : [];
+  const broadRoles = (profile.preferredRoles || []).map((role) => String(role)
+    .replace(/\b(senior|sr|junior|jr|lead|staff|principal|ii|iii|iv)\b/gi, "")
+    .replace(/\s+/g, " ").trim());
+  return [...new Set([
+    ...broadRoles,
+    ...skills.slice(0, 4),
+    "software developer",
+    "software engineer",
+  ].filter(Boolean))].filter((query) => !queries.includes(query)).slice(0, 8);
+}
+
 export function isAllowedJobLocation(location, preferredLocations = DEFAULT_JOB_LOCATIONS) {
   const normalized = normalizeJobText(location);
   const requested = Array.isArray(preferredLocations) && preferredLocations.length ? preferredLocations : DEFAULT_JOB_LOCATIONS;
@@ -180,9 +213,16 @@ export async function discoverJobs(profile) {
   const country = (process.env.JOB_SEARCH_COUNTRY || "in").toLowerCase();
   const queries = buildSearchQueries(profile);
   const locations = allowedLocations(profile);
+  const requestLocations = searchLocationVariants(locations);
   const requestedResults = Math.min(Number(process.env.JOB_SEARCH_RESULTS) || 20, 50);
-  const resultsPerRequest = Math.max(5, Math.ceil(requestedResults / Math.max(1, locations.length * queries.length)));
-  const rawJobs = (await Promise.all(queries.flatMap((query) => locations.map((location) => searchLocation({ appId, appKey, country, query, location, resultsPerPage: resultsPerRequest }))))).flat();
+  const resultsPerRequest = Math.max(5, Math.ceil(requestedResults / Math.max(1, requestLocations.length * queries.length)));
+  let searchPlan = queries;
+  let rawJobs = (await Promise.all(searchPlan.flatMap((query) => requestLocations.map((location) => searchLocation({ appId, appKey, country, query, location, resultsPerPage: resultsPerRequest }))))).flat();
+  if (!rawJobs.length) {
+    searchPlan = broaderSearchQueries(profile, queries);
+    const fallbackResultsPerRequest = Math.max(10, Math.ceil(requestedResults / Math.max(1, requestLocations.length * searchPlan.length)));
+    rawJobs = (await Promise.all(searchPlan.flatMap((query) => requestLocations.map((location) => searchLocation({ appId, appKey, country, query, location, resultsPerPage: fallbackResultsPerRequest }))))).flat();
+  }
   const seen = new Set();
   const jobs = rawJobs.map((job) => {
     const title = job.title || "Untitled job";
@@ -213,6 +253,6 @@ export async function discoverJobs(profile) {
   });
   const deduplicatedJobs = deduplicateJobs(jobs).slice(0, requestedResults);
 
-  console.log("Adzuna discovery response:", { country, queries, locations, rawResults: rawJobs.length, allowedResults: deduplicatedJobs.length });
-  return { jobs: deduplicatedJobs, rawCount: rawJobs.length, skippedCount: rawJobs.length - deduplicatedJobs.length, country, query: queries.join(" | "), queries, locations };
+  console.log("Adzuna discovery response:", { country, queries, searchPlan, locations, requestLocations, rawResults: rawJobs.length, allowedResults: deduplicatedJobs.length });
+  return { jobs: deduplicatedJobs, rawCount: rawJobs.length, skippedCount: rawJobs.length - deduplicatedJobs.length, country, query: searchPlan.join(" | "), queries: searchPlan, locations };
 }
