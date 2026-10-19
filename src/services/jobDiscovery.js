@@ -91,6 +91,11 @@ export function isValidJobSourceUrl(source, applicationUrl) {
   }
 }
 
+export function isExpiredJob(job) {
+  const urls = `${job?.applicationUrl || ""} ${job?.sourceUrl || ""}`;
+  return /(?:\/expired(?:[/?#]|$)|[?&]expired(?:=true|1)?(?:&|$))/i.test(urls);
+}
+
 export function isQualityJob(job) {
   const title = normalizeJobText(job.title);
   const company = normalizeJobText(job.company);

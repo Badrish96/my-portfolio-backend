@@ -7,7 +7,7 @@ import User from "../models/User.js";
 import { authenticate } from "../middleware/authenticate.js";
 import { scoreJob } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
-import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
+import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isExpiredJob, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
 import { discoverCompanyCareerJobs, stripHtml } from "../services/companyCareerDiscovery.js";
 
 const router = express.Router();
@@ -32,6 +32,7 @@ async function getVisibleOpenJobs(userId, limit = 500) {
   ]);
   return deduplicateJobs(jobs.filter((job) =>
     !submittedJobIds.has(job._id.toString())
+    && !isExpiredJob(job)
     && isAllowedJobLocation(job.location, preferredLocations)
     && isValidJobSourceUrl(job.source, job.applicationUrl),
   ));
@@ -149,7 +150,7 @@ router.get("/", authenticate, async (req, res) => {
       getSubmittedJobIds(req.user._id),
     ]);
     const visibleJobs = jobs;
-    const displayJobs = deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && isAllowedJobLocation(job.location, req.user.preferredLocations) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit);
+    const displayJobs = deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && !isExpiredJob(job) && isAllowedJobLocation(job.location, req.user.preferredLocations) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit);
     const matches = await JobMatch.find({ user: req.user._id, job: { $in: displayJobs.map((job) => job._id) } }).lean();
     const matchByJobId = new Map(matches.map((match) => [match.job.toString(), match]));
     const profile = getCandidateProfile(req.user);
@@ -488,6 +489,25 @@ router.post("/:jobId/score", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Job match error:", error.message);
     return res.status(error.code === "AI_RATE_LIMITED" ? 429 : 503).json({ success: false, message: error.message || "Unable to analyze this job." });
+  }
+});
+
+router.post("/:jobId/mark-submitted", authenticate, async (req, res) => {
+  try {
+    const job = await Job.findById(req.params.jobId).lean();
+    if (!job) return res.status(404).json({ success: false, message: "Job not found." });
+    const application = await Application.findOneAndUpdate(
+      { user: req.user._id, job: job._id },
+      {
+        $set: { status: "submitted", submittedAt: new Date(), notes: "Marked as submitted from the dashboard." },
+        $setOnInsert: { user: req.user._id, job: job._id },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean();
+    return res.json({ success: true, message: "Job marked as submitted.", application: { id: application._id.toString(), status: application.status } });
+  } catch (error) {
+    console.error("Mark job submitted failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to mark this job as submitted." });
   }
 });
 
