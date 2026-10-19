@@ -83,6 +83,20 @@ function titleLanguage(value) {
   ].find(([, pattern]) => pattern.test(text))?.[0] || "";
 }
 
+function titleTechnology(value) {
+  const text = String(value || "").toLowerCase().replace(/[._-]/g, " ");
+  return [
+    ["angular", /\bangular(?:js|\d+x)?\b/],
+    ["react", /\breact(?:js)?\b/],
+    ["next.js", /\bnext(?:js)?\b/],
+    ["vue", /\bvue(?:js)?\b/],
+    ["svelte", /\bsvelte\b/],
+    ["flutter", /\bflutter\b/],
+    ["kotlin", /\bkotlin\b/],
+    ["swift", /\bswift\b/],
+  ].find(([, pattern]) => pattern.test(text))?.[0] || "";
+}
+
 function roleCompatibility(profile, job) {
   const title = String(job.title || "");
   const titleFamily = roleFamilyForMatch(title);
@@ -92,6 +106,10 @@ function roleCompatibility(profile, job) {
   const candidateText = `${preferredRoles.join(" ")} ${(profile.verifiedSkills || []).join(" ")} ${profile.resumeSummary || ""}`.toLowerCase();
   if (language && !new RegExp(`(?:^|[^a-z+#])${language.replace("#", "\\#")}(?:$|[^a-z])`, "i").test(candidateText)) {
     return { compatible: false, reason: `The listing requires ${language}, which is not present in the candidate profile.` };
+  }
+  const technology = titleTechnology(title);
+  if (technology && !new RegExp(`(?:^|[^a-z+#])${technology.replace(".", "\\.")}(?:$|[^a-z])`, "i").test(candidateText)) {
+    return { compatible: false, reason: `The listing requires ${technology}, which is not present in the candidate profile.` };
   }
   if (["qa", "data", "devops", "mobile"].includes(titleFamily) && !preferredFamilies.has(titleFamily)) {
     const evidence = {
@@ -188,7 +206,7 @@ function fallbackMatch(profile, job, metadata = {}) {
     concerns: missingSkills.length ? [`Missing or unconfirmed skills: ${missingSkills.join(", ")}.`] : [],
     salaryCompatibility: "unknown",
     provider: "heuristic-fallback",
-    scoringVersion: "v6-specialty-language-guard",
+    scoringVersion: "v7-specialty-technology-guard",
     aiFallback: true,
     ...metadata,
   };
@@ -226,7 +244,7 @@ async function scoreWithModel(profile, job, model) {
     normalizeMatchResult,
   );
 
-  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v6-specialty-language-guard" };
+  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v7-specialty-technology-guard" };
 }
 
 function median(values) {
@@ -255,7 +273,7 @@ function mergeModelResults(profile, job, results) {
     concerns: [...new Set(results.flatMap((result) => result.concerns))].slice(0, 5),
     salaryCompatibility: mostCommon(results.map((result) => result.salaryCompatibility), "unknown"),
     provider: "ensemble",
-    scoringVersion: "v6-specialty-language-guard",
+    scoringVersion: "v7-specialty-technology-guard",
     modelsUsed: results.map((result) => result.model),
     agreement,
     modelResults: results.map(({ model, provider, matchScore, recommendation, matchingSkills, missingSkills }) => ({ model, provider, matchScore, recommendation, matchingSkills, missingSkills })),

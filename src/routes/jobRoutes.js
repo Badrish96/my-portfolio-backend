@@ -18,7 +18,7 @@ const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURR
 const MIN_CAREER_MATCH_SCORE = 60;
 // Bump this whenever matching rules change. Existing matches must be rescored
 // so an old overconfident AI result cannot remain in the suggestions feed.
-const CURRENT_MATCH_VERSIONS = new Set(["v6-specialty-language-guard"]);
+const CURRENT_MATCH_VERSIONS = new Set(["v7-specialty-technology-guard"]);
 
 async function getVisibleOpenJobs(userId, limit = 500) {
   const user = await User.findById(userId).select("preferredLocations").lean();
