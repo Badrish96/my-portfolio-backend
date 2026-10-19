@@ -19,7 +19,7 @@ const activeAdzunaDiscoveries = new Map();
 const MIN_CAREER_MATCH_SCORE = 60;
 // Bump this whenever matching rules change. Existing matches must be rescored
 // so an old overconfident AI result cannot remain in the suggestions feed.
-const CURRENT_MATCH_VERSIONS = new Set(["v7-specialty-technology-guard"]);
+const CURRENT_MATCH_VERSIONS = new Set(["v8-gemini-specialty-guard"]);
 
 function discoverAdzunaOnce(userId, profile) {
   const key = String(userId);
