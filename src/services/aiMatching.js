@@ -62,7 +62,19 @@ export function applyRelevanceGuard(profile, job, result) {
   const jobText = `${job.title || ""} ${job.description || ""}`;
   const skillResult = matchSkills(profile.verifiedSkills || [], job.requiredSkills || [], jobText);
   const normalizedTitle = String(job.title || "").toLowerCase();
+  const roleFamily = (value) => {
+    const text = String(value || "").toLowerCase().replace(/[._-]/g, " ");
+    if (/front\s*end|ui|web\s*client/.test(text)) return "frontend";
+    if (/back\s*end|server\s*side|api/.test(text)) return "backend";
+    if (/full\s*stack|fullstack/.test(text)) return "fullstack";
+    if (/data|etl|analytics|bi/.test(text)) return "data";
+    if (/mobile|ios|android/.test(text)) return "mobile";
+    if (/(software|web|application|platform).*(developer|engineer|programmer)|(developer|engineer|programmer)/.test(text)) return "software";
+    return "other";
+  };
+  const jobFamily = roleFamily(normalizedTitle);
   const roleHit = (profile.preferredRoles || []).some((role) => {
+    if (roleFamily(role) === jobFamily && jobFamily !== "other") return true;
     const ignored = new Set(["senior", "sr", "junior", "jr", "software", "technology", "technical", "developer", "engineer", "programmer"]);
     const words = String(role).toLowerCase().match(/[a-z0-9+#.]+/g)?.filter((word) => !ignored.has(word)) || [];
     const equivalent = { frontend: ["frontend", "front-end", "ui"], backend: ["backend", "back-end", "server-side"], "full-stack": ["full-stack", "full stack", "fullstack"], mobile: ["mobile", "ios", "android"], data: ["data", "etl", "analytics"] };
@@ -83,7 +95,7 @@ export function applyRelevanceGuard(profile, job, result) {
   if (!skillResult.matching.length) {
     // A title-only category match is useful for review, but must never become
     // a high-confidence recommendation without a verified skill overlap.
-    return { ...result, matchScore: Math.min(Number(result.matchScore) || 0, 59), recommendation: "review" };
+    return { ...result, matchScore: Math.min(Number(result.matchScore) || 0, 65), recommendation: "review" };
   }
   const evidenceCeiling = Math.min(100, 55 + skillResult.matching.length * 12 + (roleHit ? 15 : 0));
   return { ...result, matchScore: Math.min(Number(result.matchScore) || 0, evidenceCeiling), recommendation: recommendationForScore(Math.min(Number(result.matchScore) || 0, evidenceCeiling)) };
@@ -121,7 +133,7 @@ function fallbackMatch(profile, job, metadata = {}) {
     concerns: missingSkills.length ? [`Missing or unconfirmed skills: ${missingSkills.join(", ")}.`] : [],
     salaryCompatibility: "unknown",
     provider: "heuristic-fallback",
-    scoringVersion: "v4-evidence-gated",
+    scoringVersion: "v5-role-family-evidence",
     aiFallback: true,
     ...metadata,
   };
@@ -159,7 +171,7 @@ async function scoreWithModel(profile, job, model) {
     normalizeMatchResult,
   );
 
-  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v4-evidence-gated" };
+  return { ...result, recommendation: recommendationForScore(result.matchScore), provider, model, scoringVersion: "v5-role-family-evidence" };
 }
 
 function median(values) {
@@ -188,7 +200,7 @@ function mergeModelResults(profile, job, results) {
     concerns: [...new Set(results.flatMap((result) => result.concerns))].slice(0, 5),
     salaryCompatibility: mostCommon(results.map((result) => result.salaryCompatibility), "unknown"),
     provider: "ensemble",
-    scoringVersion: "v4-evidence-gated",
+    scoringVersion: "v5-role-family-evidence",
     modelsUsed: results.map((result) => result.model),
     agreement,
     modelResults: results.map(({ model, provider, matchScore, recommendation, matchingSkills, missingSkills }) => ({ model, provider, matchScore, recommendation, matchingSkills, missingSkills })),
