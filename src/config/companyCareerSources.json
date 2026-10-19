@@ -157,5 +157,10 @@
         "ats":  "greenhouse",
         "board":  "pay2dc",
         "careersUrl":  "https://job-boards.greenhouse.io/pay2dc"
+    },
+    {
+        "company":  "Cisco India",
+        "ats":  "cisco",
+        "careersUrl":  "https://careers.cisco.com/global/en/search-results?keywords=india"
     }
 ]

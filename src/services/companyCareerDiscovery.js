@@ -206,7 +206,65 @@ async function jsonLdJobs(company) {
   return jobs;
 }
 
+function jsonLdJobPostings(html, company, baseUrl) {
+  const jobs = [];
+  const scripts = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+  for (const [, script] of scripts) {
+    try {
+      const parsed = JSON.parse(script.trim());
+      const entries = Array.isArray(parsed) ? parsed : parsed?.['@graph'] || [parsed];
+      for (const entry of entries) {
+        if (entry?.['@type'] !== "JobPosting") continue;
+        jobs.push(normalizeJob(company, entry, {
+          externalId: entry.identifier?.value || entry.url || entry.title,
+          title: entry.title,
+          location: entry.jobLocation,
+          description: entry.description,
+          applicationUrl: entry.url || baseUrl,
+          postedAt: entry.datePosted,
+        }));
+      }
+    } catch {
+      // Ignore malformed JSON-LD blocks and continue with other postings.
+    }
+  }
+  return jobs;
+}
+
+async function ciscoJobs(company) {
+  const response = await fetch(company.careersUrl, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) throw new Error(`Cisco careers returned HTTP ${response.status}.`);
+  const html = (await response.text()).replace(/\\\//g, "/").replace(/&amp;/g, "&");
+  const jobs = jsonLdJobPostings(html, company, company.careersUrl);
+  const jobPaths = [...html.matchAll(/(?:https?:\/\/careers\.cisco\.com)?(\/global\/en\/job\/[^"'\\\s<>]+)/gi)]
+    .map((match) => match[1].replace(/[?#].*$/, ""))
+    .filter((path, index, all) => all.indexOf(path) === index)
+    .slice(0, 100);
+  const details = await Promise.allSettled(jobPaths.map(async (path) => {
+    const url = absoluteUrl(path, company.careersUrl);
+    const detailResponse = await fetch(url, { headers: CAREER_PAGE_HEADERS, signal: AbortSignal.timeout(20_000) });
+    if (!detailResponse.ok) throw new Error(`Cisco job page returned HTTP ${detailResponse.status}.`);
+    const detailHtml = (await detailResponse.text()).replace(/\\\//g, "/");
+    const structured = jsonLdJobPostings(detailHtml, company, url);
+    if (structured.length) return structured[0];
+    const title = detailHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1]
+      || detailHtml.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i)?.[1]
+      || detailHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
+      || "";
+    const description = detailHtml.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)/i)?.[1]
+      || detailHtml.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)/i)?.[1]
+      || "";
+    const cleanTitle = stripHtml(title).replace(/\s*[|–-]\s*Cisco Careers.*$/i, "").trim();
+    const cleanDescription = stripHtml(description);
+    if (!cleanTitle || !cleanDescription) return null;
+    const id = url.match(/\/job\/([^/]+)/i)?.[1] || url;
+    return normalizeJob(company, null, { externalId: id, title: cleanTitle, description: cleanDescription, applicationUrl: url });
+  }));
+  return [...jobs, ...details.filter((item) => item.status === "fulfilled" && item.value).map((item) => item.value)];
+}
+
 async function fetchCompanyJobs(company) {
+  if (company.ats === "cisco") return ciscoJobs(company);
   if (company.ats === "greenhouse") return greenhouseJobs(company);
   if (company.ats === "lever") return leverJobs(company);
   if (company.ats === "ashby") return ashbyJobs(company);
