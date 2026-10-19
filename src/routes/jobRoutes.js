@@ -522,6 +522,24 @@ router.post("/:jobId/mark-submitted", authenticate, async (req, res) => {
   }
 });
 
+router.delete("/:jobId", authenticate, async (req, res) => {
+  try {
+    const job = await Job.findOne({ _id: req.params.jobId, createdBy: req.user._id }).select("_id title").lean();
+    if (!job) return res.status(404).json({ success: false, message: "Job not found or it is not owned by your account." });
+    if (await Application.exists({ user: req.user._id, job: job._id })) {
+      return res.status(409).json({ success: false, message: "This job has application history and cannot be deleted." });
+    }
+    await Promise.all([
+      Job.deleteOne({ _id: job._id, createdBy: req.user._id }),
+      JobMatch.deleteMany({ user: req.user._id, job: job._id }),
+    ]);
+    return res.json({ success: true, deleted: true, jobId: job._id.toString(), message: "Job removed from your database." });
+  } catch (error) {
+    console.error("Remove job failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to remove this job." });
+  }
+});
+
 router.post("/:jobId/apply", authenticate, async (req, res) => {
   try {
     const job = await Job.findById(req.params.jobId).lean();
