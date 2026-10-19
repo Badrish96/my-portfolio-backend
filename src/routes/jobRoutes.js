@@ -414,10 +414,10 @@ router.post("/discover-careers", authenticate, async (req, res) => {
       sourceFailures: discovery.failures,
       sourceDetails: discovery.sourceDetails,
       message: savedJobs.length === 0
-        ? "No company career jobs matched your preferred locations. Check your locations or the configured career sources."
+        ? `No company career jobs matched your preferred locations. ${activeSources}/${discovery.companies} career sources returned usable listings; ${unreadableSources} were unreadable or blocked.`
         : aiFailures
-          ? `Found ${savedJobs.length} company career jobs; ${aiFailures} could not be scored. They are still available on your dashboard for review.`
-          : `Found and checked ${savedJobs.length} company career jobs against your profile.`,
+          ? `Found ${savedJobs.length} company career jobs from ${activeSources}/${discovery.companies} readable sources; ${aiFailures} could not be scored. They are still available on your dashboard for review.`
+          : `Found and checked ${savedJobs.length} company career jobs from ${activeSources}/${discovery.companies} readable sources against your profile.`,
     });
   } catch (error) {
     console.error("Company career discovery failed:", error.message);

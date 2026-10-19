@@ -58,23 +58,24 @@ function recommendationForScore(score) {
   return "skip";
 }
 
+function roleFamilyForMatch(value) {
+  const text = String(value || "").toLowerCase().replace(/[._-]/g, " ");
+  if (/front\s*end|ui|web\s*client/.test(text)) return "frontend";
+  if (/back\s*end|server\s*side|api/.test(text)) return "backend";
+  if (/full\s*stack|fullstack/.test(text)) return "fullstack";
+  if (/data|etl|analytics|bi/.test(text)) return "data";
+  if (/mobile|ios|android/.test(text)) return "mobile";
+  if (/(software|web|application|platform).*(developer|engineer|programmer)|(developer|engineer|programmer)/.test(text)) return "software";
+  return "other";
+}
+
 export function applyRelevanceGuard(profile, job, result) {
   const jobText = `${job.title || ""} ${job.description || ""}`;
   const skillResult = matchSkills(profile.verifiedSkills || [], job.requiredSkills || [], jobText);
   const normalizedTitle = String(job.title || "").toLowerCase();
-  const roleFamily = (value) => {
-    const text = String(value || "").toLowerCase().replace(/[._-]/g, " ");
-    if (/front\s*end|ui|web\s*client/.test(text)) return "frontend";
-    if (/back\s*end|server\s*side|api/.test(text)) return "backend";
-    if (/full\s*stack|fullstack/.test(text)) return "fullstack";
-    if (/data|etl|analytics|bi/.test(text)) return "data";
-    if (/mobile|ios|android/.test(text)) return "mobile";
-    if (/(software|web|application|platform).*(developer|engineer|programmer)|(developer|engineer|programmer)/.test(text)) return "software";
-    return "other";
-  };
-  const jobFamily = roleFamily(normalizedTitle);
+  const jobFamily = roleFamilyForMatch(normalizedTitle);
   const roleHit = (profile.preferredRoles || []).some((role) => {
-    if (roleFamily(role) === jobFamily && jobFamily !== "other") return true;
+    if (roleFamilyForMatch(role) === jobFamily && jobFamily !== "other") return true;
     const ignored = new Set(["senior", "sr", "junior", "jr", "software", "technology", "technical", "developer", "engineer", "programmer"]);
     const words = String(role).toLowerCase().match(/[a-z0-9+#.]+/g)?.filter((word) => !ignored.has(word)) || [];
     const equivalent = { frontend: ["frontend", "front-end", "ui"], backend: ["backend", "back-end", "server-side"], "full-stack": ["full-stack", "full stack", "fullstack"], mobile: ["mobile", "ios", "android"], data: ["data", "etl", "analytics"] };
@@ -113,7 +114,11 @@ function fallbackMatch(profile, job, metadata = {}) {
   const requiredSkills = skillResult.required;
   const missingSkills = skillResult.missing;
   const normalizedJobContent = `${job.title || ""} ${job.description || ""}`.toLowerCase();
-  const roleHit = (profile.preferredRoles || []).some((role) => normalizedJobContent.includes(String(role).toLowerCase()));
+  const jobFamily = roleFamilyForMatch(job.title);
+  const roleHit = (profile.preferredRoles || []).some((role) =>
+    (jobFamily !== "other" && roleFamilyForMatch(role) === jobFamily)
+      || normalizedJobContent.includes(String(role).toLowerCase()),
+  );
   const locationHit = (profile.preferredLocations || []).some((location) => String(job.location || "").toLowerCase().includes(String(location).toLowerCase()));
   // Give verified skills found anywhere in the full description real weight.
   // The old required-skills-only denominator made one strong overlap look weak
