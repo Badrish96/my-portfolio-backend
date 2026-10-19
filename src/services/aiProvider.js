@@ -2,6 +2,7 @@ import ollama from "ollama";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b";
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
 // A 429 from Groq is a quota state, not a transient network failure. Retrying
 // every career listing multiplies the delay and keeps the dashboard request
@@ -9,6 +10,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 900;
 const DEFAULT_RETRY_ATTEMPTS = 0;
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5 * 60_000;
 let groqRateLimitedUntil = 0;
+let geminiRateLimitedUntil = 0;
 
 export class AIProviderError extends Error {
   constructor(message, { code = "AI_PROVIDER_ERROR", retryable = false } = {}) {
@@ -117,8 +119,70 @@ function createGroqProvider(modelOverride) {
   };
 }
 
+function createGeminiProvider(modelOverride) {
+  return {
+    name: "gemini",
+    model: modelOverride || process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+    async generateText({ system, user, jsonSchema }) {
+      if (!process.env.GEMINI_API_KEY) throw new AIProviderError("GEMINI_API_KEY is not configured.", { code: "AI_NOT_CONFIGURED" });
+      if (Date.now() < geminiRateLimitedUntil) {
+        throw new AIProviderError("Gemini rate limit is active; using the local fallback matcher.", { code: "AI_RATE_LIMITED", retryable: false });
+      }
+      const model = modelOverride || process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+      // Gemini supports a JSON-Schema subset; omit OpenAI-specific strictness
+      // fields while preserving the object, enum, array, and required rules.
+      const responseSchema = jsonSchema
+        ? JSON.parse(JSON.stringify(jsonSchema, (key, value) => key === "additionalProperties" ? undefined : value))
+        : undefined;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), Number(process.env.AI_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
+      try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: system }] },
+            contents: [{ role: "user", parts: [{ text: user }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: Math.max(256, Math.min(Number(process.env.AI_MAX_OUTPUT_TOKENS) || DEFAULT_MAX_OUTPUT_TOKENS, 1500)),
+              ...(responseSchema ? { responseMimeType: "application/json", responseSchema } : {}),
+            },
+          }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          return data.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
+        }
+        const detail = await response.text();
+        if (response.status === 429 || /RESOURCE_EXHAUSTED|rate.?limit/i.test(detail)) {
+          const retryAfterHeader = Number(response.headers.get("retry-after"));
+          const retryAfterMessage = Number(detail.match(/retry in ([0-9.]+)s/i)?.[1]);
+          const cooldownMs = Math.min(10 * 60_000, Math.max(30_000, Math.ceil((retryAfterHeader || retryAfterMessage || 60) * 1000)));
+          geminiRateLimitedUntil = Date.now() + cooldownMs;
+          console.warn(`Gemini rate limit reached; disabling Gemini calls for ${Math.ceil(cooldownMs / 60_000)} minute(s) and using fallback matching.`);
+        }
+        const message = response.status === 404
+          ? `Gemini model "${model}" was not found. Set GEMINI_MODEL to a currently available model.`
+          : `Gemini request failed (${response.status}).`;
+        console.error("Gemini request failed:", { status: response.status, model, detail: detail.slice(0, 500) });
+        throw new AIProviderError(message, { code: response.status === 429 ? "AI_RATE_LIMITED" : "AI_REQUEST_FAILED", retryable: response.status === 429 || response.status >= 500, cause: detail });
+      } catch (error) {
+        if (error instanceof AIProviderError) throw error;
+        throw new AIProviderError("The Gemini provider is unavailable.", { code: "AI_UNAVAILABLE", retryable: true, cause: error });
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+  };
+}
+
 export function createAIProvider({ model } = {}) {
-  return (process.env.AI_PROVIDER || "ollama").toLowerCase() === "groq" ? createGroqProvider(model) : createOllamaProvider(model);
+  const provider = (process.env.AI_PROVIDER || "ollama").toLowerCase();
+  if (provider === "groq") return createGroqProvider(model);
+  if (provider === "gemini" || provider === "google") return createGeminiProvider(model);
+  return createOllamaProvider(model);
 }
 
 export async function generateStructured(input, schema, transform = (value) => value) {

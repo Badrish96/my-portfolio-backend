@@ -36,6 +36,8 @@ function configuredModels() {
     .filter(Boolean);
   const defaultModel = (process.env.AI_PROVIDER || "ollama").toLowerCase() === "groq"
     ? (process.env.GROQ_MODEL || "openai/gpt-oss-20b")
+    : ["gemini", "google"].includes((process.env.AI_PROVIDER || "ollama").toLowerCase())
+      ? (process.env.GEMINI_MODEL || "gemini-3.6-flash")
     : (process.env.OLLAMA_MODEL || "qwen2.5:3b");
   return [...new Set(configured.length ? configured : [defaultModel])];
 }
