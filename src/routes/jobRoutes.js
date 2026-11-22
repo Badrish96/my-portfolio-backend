@@ -1,25 +1,30 @@
+import { randomUUID } from "node:crypto";
 import express from "express";
 import { z } from "zod";
 import Job from "../models/Job.js";
 import JobMatch from "../models/JobMatch.js";
 import Application from "../models/Application.js";
-import User from "../models/User.js";
+import { publicUser } from "../services/authService.js";
 import { authenticate } from "../middleware/authenticate.js";
-import { scoreJob, scoreJobFallback } from "../services/aiMatching.js";
+import { evaluationKey, scoreJob, scoreJobFallback, shouldEvaluateWithAI } from "../services/aiMatching.js";
 import { createAIProvider } from "../services/aiProvider.js";
-import { allowedJobLocationFilter, deduplicateJobs, discoverJobs, isAllowedJobLocation, isExpiredJob, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
+import { discoverJobs, isExpiredJob, isQualityJob, isValidJobSourceUrl, JobDiscoveryError } from "../services/jobDiscovery.js";
 import { discoverCompanyCareerJobs, stripHtml } from "../services/companyCareerDiscovery.js";
 
+import { importPostings } from "../services/jobImport.js";
+import { collapsePostings } from "../services/jobDeduplication.js";
+
 const router = express.Router();
-const SCORE_CONCURRENCY = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
+const feedbackCompany = (company) => String(company || "").trim().toLowerCase();
+const feedbackInput = z.object({
+  decision: z.enum(["relevant", "not_relevant", "applied", "saved", "rejected", "duplicate"]),
+  reason: z.enum(["wrong_role", "backend_heavy", "wrong_experience", "wrong_location", "low_salary", "skills_mismatch", "company", "other"]).optional(),
+});
 const activeAdzunaDiscoveries = new Map();
-// Career pages often omit structured skill lists. The general jobs list should
-// show every career job that was actually evaluated; the AI Matches endpoint
-// applies the stricter score/recommendation filter below.
-const MIN_CAREER_MATCH_SCORE = 60;
-// Bump this whenever matching rules change. Existing matches must be rescored
-// so an old overconfident AI result cannot remain in the suggestions feed.
-const CURRENT_MATCH_VERSIONS = new Set(["v9-gemini-budgeted"]);
+function minimumMatchScore() {
+  const configured = Number(process.env.JOB_MIN_MATCH_SCORE ?? 60);
+  return Number.isFinite(configured) ? Math.min(100, Math.max(0, configured)) : 60;
+}
 
 function discoverAdzunaOnce(userId, profile) {
   const key = String(userId);
@@ -30,31 +35,24 @@ function discoverAdzunaOnce(userId, profile) {
   return request;
 }
 
-async function getVisibleOpenJobs(userId, limit = 500) {
-  const user = await User.findById(userId).select("preferredLocations").lean();
-  const preferredLocations = user?.preferredLocations || [];
+async function getVisibleOpenJobs(userId, limit = 500, search = "") {
+  const filter = { status: "open", ...(search ? { $text: { $search: search } } : {}) };
   const [jobs, submittedJobIds] = await Promise.all([
-    Job.find({ status: "open", ...(preferredLocations.length ? {} : allowedJobLocationFilter) })
-      .sort({ postedAt: -1, createdAt: -1 })
-      .limit(Math.min(limit * 4, preferredLocations.length ? 500 : 100))
-      .lean(),
+    Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(limit).lean(),
     getSubmittedJobIds(userId),
   ]);
-  return deduplicateJobs(jobs.filter((job) =>
-    !submittedJobIds.has(job._id.toString())
-    && !isExpiredJob(job)
-    && isAllowedJobLocation(job.location, preferredLocations)
-    && isValidJobSourceUrl(job.source, job.applicationUrl),
-  ));
+  const eligible = jobs.filter((job) => !isExpiredJob(job) && isQualityJob(job));
+  const merged = collapsePostings(eligible.map((job) => ({ ...job, submitted: submittedJobIds.has(String(job._id)) })));
+  return merged.filter((job) => !job.submitted);
 }
 
 async function getSubmittedJobIds(userId) {
   const applications = await Application.find({ user: userId, status: "submitted" }).select("job").lean();
   return new Set(applications.map((application) => application.job?.toString()).filter(Boolean));
 }
-
 async function scoreWithLimit(items, worker) {
   const results = [];
+  const concurrency = Math.max(1, Math.min(Number(process.env.AI_MAX_CONCURRENT_REQUESTS) || 2, 4));
   let cursor = 0;
   const runWorker = async () => {
     while (cursor < items.length) {
@@ -67,55 +65,76 @@ async function scoreWithLimit(items, worker) {
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(SCORE_CONCURRENCY, items.length) }, runWorker));
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runWorker));
   return results;
 }
 
-function hostedAiBudget(itemCount) {
-  const provider = String(process.env.AI_PROVIDER || "ollama").toLowerCase();
-  if (!['gemini', 'google'].includes(provider)) return itemCount;
-  return Math.min(itemCount, Math.max(0, Number(process.env.AI_DISCOVERY_AI_LIMIT) || 5));
+async function storeMatch(userId, job, result, key) {
+  return JobMatch.findOneAndUpdate(
+    { user: userId, job: job._id },
+    { $set: { ...result, evaluationKey: key, evaluatedAt: new Date() } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  ).lean();
 }
 
 async function evaluateJobsForUser({ userId, profile, jobs }) {
-  if (!jobs.length) return { aiScored: 0, aiFailures: 0 };
-  const ranked = jobs
-    .map((job) => ({ job, fallback: scoreJobFallback(profile, job) }))
-    .sort((left, right) => right.fallback.matchScore - left.fallback.matchScore);
+  jobs = [...new Map(jobs.map((job) => [String(job._id), job])).values()];
+  const existing = await JobMatch.find({ user: userId, job: { $in: jobs.map((job) => job._id) } }).lean();
+  const existingById = new Map(existing.map((match) => [String(match.job), match]));
+  const ranked = jobs.map((job) => {
+    const key = evaluationKey(profile, job);
+    const cached = existingById.get(String(job._id));
+    const current = cached?.evaluationKey === key ? cached : null;
+    const rules = current || scoreJobFallback(profile, job);
+    return { job, key, current, rules };
+  }).sort((a, b) => Math.abs(a.rules.matchScore - 70) - Math.abs(b.rules.matchScore - 70));
 
-  // Persist a description-aware local score for every listing first. This
-  // keeps the feed useful even when Gemini's free quota is exhausted.
-  await Promise.all(ranked.map(({ job, fallback }) => JobMatch.findOneAndUpdate(
-    { user: userId, job: job._id },
-    { user: userId, job: job._id, ...fallback, evaluatedAt: new Date() },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
-  )));
-
-  const candidates = ranked.slice(0, hostedAiBudget(ranked.length));
-  const results = await scoreWithLimit(candidates, async ({ job }) => {
-    const result = await scoreJob(profile, job);
-    await JobMatch.findOneAndUpdate(
-      { user: userId, job: job._id },
-      { user: userId, job: job._id, ...result, evaluatedAt: new Date() },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
-    return result;
+  const limit = Math.max(0, Math.min(20, Number(process.env.AI_DISCOVERY_AI_LIMIT ?? 5) || 0));
+  const aiCandidates = new Set(ranked.filter(({ job, current, rules }) =>
+    shouldEvaluateWithAI(job, rules)
+    && current?.aiStatus !== "evaluated"
+    && (current?.aiStatus !== "failed" || Date.now() - new Date(current.evaluatedAt) >= 300000)).slice(0, limit));
+  const results = await scoreWithLimit(ranked, async (item) => {
+    const { job, current, rules, key } = item;
+    if (aiCandidates.has(item)) {
+      if (!current) await storeMatch(userId, job, rules, key);
+      const startedAt = Date.now();
+      const evaluated = await scoreJob(profile, job, rules);
+      const latencyMs = Date.now() - startedAt;
+      await storeMatch(userId, job, evaluated, key);
+      return { status: evaluated.aiStatus, latencyMs, score: evaluated.matchScore };
+    }
+    if (!current) await storeMatch(userId, job, rules, key);
+    return { status: current ? "cached" : "rules", score: rules.matchScore };
   });
-  return {
-    aiScored: results.filter((item) => item.status === "fulfilled" && !item.value.aiFallback).length,
-    aiFailures: results.filter((item) => item.status === "rejected" || item.value?.aiFallback).length,
+  const evaluations = results.filter(({ value }) => value?.latencyMs !== undefined);
+  const counts = {
+    aiScored: results.filter(({ value }) => value?.status === "evaluated").length,
+    aiFailures: results.filter((item) => item.status === "rejected" || item.value?.status === "failed").length,
+    belowThreshold: results.filter(({ value }) => value?.score < minimumMatchScore()).length,
+    cached: results.filter(({ value }) => value?.status === "cached").length,
   };
+  if (jobs.length) console.info("Job matching batch", {
+    checked: jobs.length,
+    ...counts,
+    aiInvocations: evaluations.length,
+    averageAiLatencyMs: evaluations.length ? Math.round(evaluations.reduce((sum, { value }) => sum + value.latencyMs, 0) / evaluations.length) : 0,
+  });
+  return counts;
 }
-
+const webUrl = z.string().url().refine((value) => /^https?:\/\//i.test(value));
 const jobInput = z.object({
   title: z.string().trim().min(2).max(200),
   company: z.string().trim().min(2).max(160),
   location: z.string().trim().max(160).optional().default(""),
   employmentType: z.string().trim().max(80).optional(),
-  description: z.string().trim().min(20).max(30_000),
+  description: z.string().trim().max(30_000).optional().default(""),
   requiredSkills: z.array(z.string().trim().min(1).max(80)).max(50).optional().default([]),
-  applicationUrl: z.string().url(),
-  sourceUrl: z.string().url().optional(),
+  preferredSkills: z.array(z.string().trim().min(1).max(80)).max(50).optional().default([]),
+  applicationUrl: webUrl,
+  sourceUrl: webUrl.optional(),
+  canonicalUrl: webUrl.optional(),
+  requisitionId: z.string().trim().max(120).optional(),
   salaryMin: z.number().nonnegative().optional(),
   salaryMax: z.number().nonnegative().optional(),
   salaryCurrency: z.string().trim().max(8).optional().default("INR"),
@@ -135,34 +154,30 @@ const assistantChatInput = z.object({
   })).max(12).optional().default([]),
 });
 
-const importedJobInput = z.object({
+const importedJobInput = jobInput.extend({
   source: z.enum(["linkedin", "naukri", "hirist", "indeed", "adzuna", "generic"]),
   externalId: z.string().trim().min(1).max(300),
-  title: z.string().trim().min(2).max(200),
   company: z.string().trim().min(1).max(160),
-  location: z.string().trim().max(160).optional().default(""),
-  description: z.string().trim().min(20).max(30_000),
-  applicationUrl: z.string().url(),
-  sourceUrl: z.string().url().optional(),
-  postedAt: z.coerce.date().optional(),
 });
 
-const getCandidateProfile = (user) => ({
-  name: user.name,
-  email: user.email,
-  location: user.location || "",
-  userType: user.userType,
-  bio: user.bio || "",
-  verifiedSkills: user.skills || [],
-  preferredRoles: user.preferredRoles || [],
-  preferredLocations: user.preferredLocations || [],
-  verifiedExperienceYears: user.experienceYears || null,
-  resumeSummary: user.resumeSummary || "",
-  experienceDetails: user.experienceDetails || "",
-  educationDetails: user.educationDetails || "",
-  projectDetails: user.projectDetails || "",
-  certifications: user.certifications || "",
-});
+const getCandidateProfile = (account) => {
+  const user = publicUser(account);
+  return {
+    location: user.location || "",
+    userType: user.userType,
+    bio: user.bio || "",
+    verifiedSkills: user.skills || [],
+    preferredRoles: user.preferredRoles || [],
+    preferredLocations: user.preferredLocations || [],
+    verifiedExperienceYears: user.relevantExperienceYears ?? user.experienceYears ?? null,
+    targetSalaryMin: (!user.expectedSalaryCurrency || user.expectedSalaryCurrency === "INR") ? (account.expectedSalary || account.expectedCompensation || user.expectedSalary) : null,
+    resumeSummary: user.resumeSummary || "",
+    experienceDetails: user.experienceDetails || "",
+    educationDetails: user.educationDetails || "",
+    projectDetails: user.projectDetails || "",
+    certifications: user.certifications || "",
+  };
+};
 
 const serializeJob = (job, match = null) => ({
   id: job._id.toString(),
@@ -180,56 +195,60 @@ const serializeJob = (job, match = null) => ({
   applicationUrl: job.applicationUrl,
   sourceUrl: job.sourceUrl || job.applicationUrl,
   postedAt: job.postedAt,
+  sources: job.sources || [],
+  possibleDuplicate: Boolean(job.possibleDuplicateIds?.length),
   status: job.status,
   match,
 });
 
+function isRecommended(match) {
+  return match.recommendation !== "skip" && match.matchScore >= minimumMatchScore()
+    && !["not_relevant", "rejected", "duplicate"].includes(match.feedback?.decision);
+}
+
+async function rankedJobs(user, jobs) {
+  const stored = await JobMatch.find({ user: user._id, $or: [
+    { job: { $in: jobs.map((job) => job._id) } },
+    { "feedback.decision": { $in: ["relevant", "not_relevant", "saved", "applied", "rejected"] } },
+  ] }).lean();
+  const byJob = new Map(stored.map((match) => [String(match.job), match]));
+  const preferences = new Map();
+  for (const { feedback } of stored) {
+    if (!feedback?.company || feedback.decision === "duplicate") continue;
+    const signal = preferences.get(feedback.company) || { count: 0, sum: 0 };
+    signal.count += 1;
+    signal.sum += ["relevant", "saved", "applied"].includes(feedback.decision) ? 1 : -1;
+    preferences.set(feedback.company, signal);
+  }
+  const profile = getCandidateProfile(user);
+  return jobs.map((job) => {
+    const saved = byJob.get(String(job._id));
+    const result = saved?.evaluationKey === evaluationKey(profile, job) ? saved : scoreJobFallback(profile, job);
+    const signal = preferences.get(feedbackCompany(job.company));
+    const preferenceAdjustment = signal?.count >= 3 ? Math.round(4 * signal.sum / signal.count) : 0;
+    const { matchScore, category, recommendation, matchingSkills, missingSkills, reasons, concerns, salaryCompatibility, provider, scoringVersion, dimensions, preferredSkills, semanticScore, promptVersion, modelsUsed } = result;
+    const match = { matchScore, category, recommendation, matchingSkills, missingSkills, reasons, concerns, salaryCompatibility, provider, scoringVersion, dimensions, preferredSkills, semanticScore, promptVersion, modelsUsed, feedback: saved?.feedback, preferenceAdjustment };
+    return { job, match, rank: matchScore + preferenceAdjustment };
+  }).sort((a, b) => b.rank - a.rank);
+}
+
 router.get("/", authenticate, async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
   const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
-  const filter = { status: "open", ...(req.user.preferredLocations?.length ? {} : allowedJobLocationFilter) };
-  if (search) filter.$text = { $search: search };
-
   try {
-    const [jobs, submittedJobIds] = await Promise.all([
-      Job.find(filter).sort({ postedAt: -1, createdAt: -1 }).limit(Math.min(limit * 4, req.user.preferredLocations?.length ? 500 : 100)).lean(),
-      getSubmittedJobIds(req.user._id),
-    ]);
-    const visibleJobs = jobs;
-    const displayJobs = deduplicateJobs(visibleJobs.filter((job) => !submittedJobIds.has(job._id.toString()) && !isExpiredJob(job) && isAllowedJobLocation(job.location, req.user.preferredLocations) && isValidJobSourceUrl(job.source, job.applicationUrl))).slice(0, limit);
-    const matches = await JobMatch.find({ user: req.user._id, job: { $in: displayJobs.map((job) => job._id) } }).lean();
-    const matchByJobId = new Map(matches.map((match) => [match.job.toString(), match]));
-    const profile = getCandidateProfile(req.user);
-    const needsScoring = displayJobs.filter((job) => {
-      const match = matchByJobId.get(job._id.toString());
-      const profileUpdated = match && req.user.updatedAt && new Date(match.updatedAt) < new Date(req.user.updatedAt);
-      return !match || !CURRENT_MATCH_VERSIONS.has(match.scoringVersion) || profileUpdated;
-    }).slice(0, 5);
-    if (needsScoring.length) await evaluateJobsForUser({ userId: req.user._id, profile, jobs: needsScoring });
-    if (needsScoring.length) {
-      const refreshedMatches = await JobMatch.find({ user: req.user._id, job: { $in: needsScoring.map((job) => job._id) } }).lean();
-      refreshedMatches.forEach((match) => matchByJobId.set(match.job.toString(), match));
-    }
-    return res.json({ success: true, jobs: displayJobs.map((job) => {
-      const match = matchByJobId.get(job._id.toString());
-      return serializeJob(job, match ? {
-        matchScore: match.matchScore,
-        recommendation: match.recommendation,
-        matchingSkills: match.matchingSkills,
-        missingSkills: match.missingSkills,
-        reasons: match.reasons,
-        concerns: match.concerns,
-        salaryCompatibility: match.salaryCompatibility,
-        provider: match.provider,
-        scoringVersion: match.scoringVersion,
-      } : null);
-    }) });
+    const ranks = await rankedJobs(req.user, await getVisibleOpenJobs(req.user._id, 500, search));
+    const review = req.query.visibility === "review";
+    const jobs = ranks.filter(({ match }) => review !== isRecommended(match))
+      .slice(0, limit).map(({ job, match }) => serializeJob(job, match));
+    const reviewJobs = req.query.includeReview === "true"
+      ? ranks.filter(({ match }) => !isRecommended(match)).slice(0, limit).map(({ job, match }) => serializeJob(job, match))
+      : undefined;
+    return res.json({ success: true, jobs, reviewJobs, minMatchScore: minimumMatchScore() });
   } catch (error) {
     console.error("Job listing failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load jobs." });
   }
 });
-
 router.get("/summary", authenticate, async (req, res) => {
   try {
     const [visibleJobs, applications, shortlisted, interviews, readyForReview] = await Promise.all([
@@ -239,7 +258,8 @@ router.get("/summary", authenticate, async (req, res) => {
       Application.countDocuments({ user: req.user._id, status: "interview" }),
       Application.countDocuments({ user: req.user._id, status: "ready_for_review" }),
     ]);
-    return res.json({ success: true, summary: { jobsDiscovered: visibleJobs.length, applications, shortlisted, interviews, readyForReview } });
+    const ranks = await rankedJobs(req.user, visibleJobs);
+    return res.json({ success: true, summary: { jobsDiscovered: ranks.filter(({ match }) => isRecommended(match)).length, applications, shortlisted, interviews, readyForReview } });
   } catch (error) {
     console.error("Job summary failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load dashboard summary." });
@@ -248,55 +268,15 @@ router.get("/summary", authenticate, async (req, res) => {
 
 router.get("/suggestions", authenticate, async (req, res) => {
   try {
-    const [jobs, submittedJobIds, matches] = await Promise.all([
-      getVisibleOpenJobs(req.user._id, 300),
-      getSubmittedJobIds(req.user._id),
-      JobMatch.find({ user: req.user._id }).lean(),
-    ]);
-    const matchByJobId = new Map(matches.map((match) => [match.job.toString(), match]));
-    const profile = getCandidateProfile(req.user);
-    // A failed model call or a newly imported board listing must not make the
-    // suggestions page empty forever. Evaluate missing/stale matches on demand.
-    const needsScoring = jobs.filter((job) => {
-      const match = matchByJobId.get(job._id.toString());
-      return !match || !CURRENT_MATCH_VERSIONS.has(match.scoringVersion);
-    }).slice(0, 24);
-    if (needsScoring.length) await evaluateJobsForUser({ userId: req.user._id, profile, jobs: needsScoring });
-    if (needsScoring.length) {
-      const refreshedMatches = await JobMatch.find({ user: req.user._id, job: { $in: needsScoring.map((job) => job._id) } }).lean();
-      refreshedMatches.forEach((match) => matchByJobId.set(match.job.toString(), match));
-    }
-    const qualityMatches = jobs
-      .filter((job) => !submittedJobIds.has(job._id.toString()) && isQualityJob(job))
-      .map((job) => ({ job, match: matchByJobId.get(job._id.toString()) }))
-      .filter(({ match }) => match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip")
-      .sort((left, right) => {
-        const scoreDelta = (right.match.matchScore || 0) - (left.match.matchScore || 0);
-        if (scoreDelta) return scoreDelta;
-        return new Date(right.job.postedAt || right.job.fetchedAt || right.job.createdAt || 0) - new Date(left.job.postedAt || left.job.fetchedAt || left.job.createdAt || 0);
-      });
-    const uniqueJobs = deduplicateJobs(qualityMatches.map(({ job }) => job));
-    const uniqueIds = new Set(uniqueJobs.map((job) => job._id.toString()));
-    return res.json({ success: true, suggestions: qualityMatches.filter(({ job }) => uniqueIds.has(job._id.toString())).slice(0, 20).map(({ job, match: item }) => serializeJob(job, {
-      matchScore: item.matchScore,
-      recommendation: item.recommendation,
-      matchingSkills: item.matchingSkills,
-      missingSkills: item.missingSkills,
-      reasons: item.reasons,
-      concerns: item.concerns,
-      salaryCompatibility: item.salaryCompatibility,
-      provider: item.provider,
-      scoringVersion: item.scoringVersion,
-      modelsUsed: item.modelsUsed,
-      agreement: item.agreement,
-      modelResults: item.modelResults,
-    })) });
+    const ranks = await rankedJobs(req.user, await getVisibleOpenJobs(req.user._id));
+    const suggestions = ranks.filter(({ match }) => isRecommended(match))
+      .slice(0, 20).map(({ job, match }) => serializeJob(job, match));
+    return res.json({ success: true, suggestions });
   } catch (error) {
     console.error("Job suggestions failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to load job suggestions." });
   }
 });
-
 router.post("/assistant/chat", authenticate, async (req, res) => {
   const parsed = assistantChatInput.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ success: false, message: "Enter a message up to 2,000 characters." });
@@ -304,10 +284,7 @@ router.post("/assistant/chat", authenticate, async (req, res) => {
   try {
     const profile = getCandidateProfile(req.user);
     const jobs = await getVisibleOpenJobs(req.user._id, 300);
-    const matches = await JobMatch.find({ user: req.user._id, job: { $in: jobs.map((job) => job._id) } })
-      .select("job matchScore recommendation matchingSkills missingSkills reasons")
-      .lean();
-    const matchById = new Map(matches.map((match) => [match.job.toString(), match]));
+    const matchById = new Map((await rankedJobs(req.user, jobs)).map(({ job, match }) => [String(job._id), match]));
     const messageTerms = parsed.data.message.toLowerCase().match(/[a-z0-9+#.]{2,}/g) || [];
     const stopWords = new Set(["find", "show", "search", "jobs", "job", "please", "me", "for", "with", "from", "that", "this", "have", "want", "need", "apply", "can", "you", "the", "and", "in", "at", "to", "my", "are"]);
     const queryTerms = [...new Set(messageTerms.filter((term) => !stopWords.has(term)))];
@@ -320,7 +297,7 @@ router.post("/assistant/chat", authenticate, async (req, res) => {
       const profileHits = profileTerms.filter((term) => text.includes(term)).length;
       const rank = queryHits * 12 + profileHits * 3 + (match?.matchScore || 0) / 10;
       return { job, match, rank, queryHits };
-    }).filter(({ match }) => match && match.matchScore >= MIN_CAREER_MATCH_SCORE && match.recommendation !== "skip")
+    }).filter(({ match }) => match && isRecommended(match))
       .sort((a, b) => b.rank - a.rank).slice(0, 8);
     const assistantJobs = ranked.map(({ job, match }) => serializeJob(job, match ? {
       matchScore: match.matchScore,
@@ -373,11 +350,7 @@ router.post("/discover", authenticate, async (req, res) => {
   try {
     const profile = getCandidateProfile(req.user);
     const discovery = await discoverAdzunaOnce(req.user._id, profile);
-    const savedJobs = await Promise.all(discovery.jobs.map((job) => Job.findOneAndUpdate(
-      { source: job.source, externalId: job.externalId },
-      { $set: job, $setOnInsert: { createdBy: req.user._id } },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).lean()));
+    const savedJobs = (await importPostings(discovery.jobs, req.user._id)).map(({ job }) => job);
 
     const { aiScored, aiFailures } = await evaluateJobsForUser({ userId: req.user._id, profile, jobs: savedJobs });
     const message = savedJobs.length === 0
@@ -415,11 +388,7 @@ router.post("/discover-careers", authenticate, async (req, res) => {
   try {
     const profile = getCandidateProfile(req.user);
     const discovery = await discoverCompanyCareerJobs(profile);
-    const savedJobs = await Promise.all(discovery.jobs.map((job) => Job.findOneAndUpdate(
-      { source: job.source, externalId: job.externalId },
-      { $set: job, $setOnInsert: { createdBy: req.user._id } },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).lean()));
+    const savedJobs = (await importPostings(discovery.jobs, req.user._id)).map(({ job }) => job);
 
     const { aiScored, aiFailures } = await evaluateJobsForUser({ userId: req.user._id, profile, jobs: savedJobs });
     const activeSources = discovery.sourceDetails.filter((source) => source.returned > 0).length;
@@ -454,13 +423,13 @@ router.post("/import", authenticate, async (req, res) => {
 
   try {
     const profile = getCandidateProfile(req.user);
-    const savedJobs = await Promise.all(parsedJobs.map((job) => Job.findOneAndUpdate(
-      { source: job.source, externalId: job.externalId },
-      { $set: { ...job, fetchedAt: new Date(), status: "open", sourceUrl: job.sourceUrl || job.applicationUrl }, $setOnInsert: { createdBy: req.user._id } },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).lean()));
-    const { aiScored, aiFailures } = await evaluateJobsForUser({ userId: req.user._id, profile, jobs: savedJobs });
-    return res.json({ success: true, imported: savedJobs.length, aiScored, aiFailures });
+    const imported = await importPostings(parsedJobs, req.user._id);
+    const evaluation = await evaluateJobsForUser({ userId: req.user._id, profile, jobs: imported.map(({ job }) => job) });
+    const duplicates = imported.filter(({ duplicate }) => duplicate).length;
+    const possibleDuplicates = imported.filter(({ possible }) => possible).length;
+    const skipped = jobs.length - parsedJobs.length;
+    console.info("Job import batch", { supplied: jobs.length, skipped, duplicates, possibleDuplicates });
+    return res.json({ success: true, imported: imported.length, ...evaluation, duplicates, possibleDuplicates, skipped });
   } catch (error) {
     console.error("Local job import failed:", error.message);
     return res.status(500).json({ success: false, message: "Unable to import local jobs." });
@@ -472,7 +441,7 @@ router.post("/", authenticate, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.issues[0]?.message || "Invalid job data." });
 
   try {
-    const job = await Job.create({ ...parsed.data, source: "manual", createdBy: req.user._id, fetchedAt: new Date() });
+    const job = await Job.create({ ...parsed.data, source: "manual", externalId: randomUUID(), createdBy: req.user._id, fetchedAt: new Date() });
     return res.status(201).json({ success: true, job: serializeJob(job) });
   } catch (error) {
     console.error("Job creation failed:", error.message);
@@ -496,16 +465,35 @@ router.post("/:jobId/score", authenticate, async (req, res) => {
   try {
     const job = await Job.findById(req.params.jobId).lean();
     if (!job) return res.status(404).json({ success: false, message: "Job not found." });
-    const result = await scoreJob(getCandidateProfile(req.user), job);
-    const match = await JobMatch.findOneAndUpdate(
-      { user: req.user._id, job: job._id },
-      { user: req.user._id, job: job._id, ...result, evaluatedAt: new Date() },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).lean();
+    const profile = getCandidateProfile(req.user);
+    const key = evaluationKey(profile, job);
+    const cached = await JobMatch.findOne({ user: req.user._id, job: job._id, evaluationKey: key, aiStatus: "evaluated" }).lean();
+    if (cached) return res.json({ success: true, match: { ...scoreJobFallback(profile, job), matchScore: cached.matchScore, category: cached.category, recommendation: cached.recommendation, provider: cached.provider, aiStatus: cached.aiStatus, aiFallback: false, semanticScore: cached.semanticScore, id: String(cached._id) } });
+    const result = await scoreJob(profile, job);
+    const match = await storeMatch(req.user._id, job, result, key);
     return res.json({ success: true, match: { ...result, id: match._id.toString() } });
   } catch (error) {
     console.error("Job match error:", error.message);
     return res.status(error.code === "AI_RATE_LIMITED" ? 429 : 503).json({ success: false, message: error.message || "Unable to analyze this job." });
+  }
+});
+
+router.put("/:jobId/feedback", authenticate, async (req, res) => {
+  const input = feedbackInput.safeParse(req.body);
+  if (!input.success) return res.status(400).json({ success: false, message: "Select valid feedback." });
+  try {
+    const job = await Job.findById(req.params.jobId).lean();
+    if (!job) return res.status(404).json({ success: false, message: "Job not found." });
+    const profile = getCandidateProfile(req.user);
+    const feedback = { ...input.data, company: feedbackCompany(job.company), recordedAt: new Date() };
+    await JobMatch.updateOne({ user: req.user._id, job: job._id }, {
+      $set: { feedback },
+      $setOnInsert: { ...scoreJobFallback(profile, job), evaluationKey: evaluationKey(profile, job) },
+    }, { upsert: true });
+    return res.json({ success: true, feedback });
+  } catch (error) {
+    console.error("Job feedback failed:", error.message);
+    return res.status(500).json({ success: false, message: "Unable to save feedback." });
   }
 });
 

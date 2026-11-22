@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { deduplicateJobs, isAllowedJobLocation, isQualityJob, normalizeJobText } from "./jobDiscovery.js";
-import { extractSkills } from "./skillMatching.js";
 
 const DEFAULT_LIMIT = 100;
 const CAREER_PAGE_TIMEOUT_MS = 10_000;
@@ -94,7 +93,7 @@ function normalizeJob(company, raw, fields) {
     applicationMessage: DEFAULT_RECRUITER_MESSAGE,
     requiredSkills: Array.isArray(fields.requiredSkills) && fields.requiredSkills.length
       ? fields.requiredSkills
-      : extractSkills(`${title} ${description}`),
+      : [],
     applicationUrl,
     sourceUrl: applicationUrl,
     postedAt: fields.postedAt ? new Date(fields.postedAt) : new Date(),

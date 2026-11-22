@@ -1,4 +1,4 @@
-import ollama from "ollama";
+import { Ollama } from "ollama";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b";
@@ -32,6 +32,13 @@ const parseJson = (text) => {
 };
 
 function createOllamaProvider(modelOverride) {
+  const ollama = new Ollama({
+    host: process.env.OLLAMA_BASE_URL,
+    fetch: (input, init) => fetch(input, {
+      ...init,
+      signal: AbortSignal.timeout(Math.max(1, Number(process.env.AI_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS)),
+    }),
+  });
   return {
     name: "ollama",
     model: modelOverride || process.env.OLLAMA_MODEL || "qwen2.5:3b",

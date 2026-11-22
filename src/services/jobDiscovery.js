@@ -1,8 +1,8 @@
+import { collapsePostings } from "./jobDeduplication.js";
 const ADZUNA_BASE_URL = "https://api.adzuna.com/v1/api/jobs";
 const ADZUNA_MAX_REQUESTS = 6;
 const ADZUNA_REQUEST_CONCURRENCY = 2;
 let adzunaRateLimitedUntil = 0;
-import { extractSkills } from "./skillMatching.js";
 
 export const DEFAULT_JOB_LOCATIONS = ["Gurugram", "Bangalore", "Noida", "Delhi NCR"];
 const EXCLUDED_COMPANIES = new Set(["dataannotation"]);
@@ -95,6 +95,7 @@ export function isAllowedJobLocation(location, preferredLocations = DEFAULT_JOB_
   const requested = Array.isArray(preferredLocations) && preferredLocations.length ? preferredLocations : DEFAULT_JOB_LOCATIONS;
   return requested.some((preference) => {
     const key = normalizeJobText(preference);
+    if (key === "remote india" || key === "india remote") return /\bremote\b/.test(normalized) && /\bindia\b/.test(normalized) && !/outside india/.test(normalized);
     const aliases = LOCATION_ALIASES[key] || Object.values(LOCATION_ALIASES).find((values) => values.includes(key)) || [key];
     return aliases.some((alias) => new RegExp(`\\b${normalizeJobText(alias).replace(/ /g, "\\s+")}\\b`, "i").test(normalized));
   });
@@ -115,6 +116,7 @@ export function isExcludedJobCompany(company) {
 export function isValidJobSourceUrl(source, applicationUrl) {
   try {
     const url = new URL(applicationUrl);
+    if (!/^https?:$/.test(url.protocol)) return false;
     const hostname = url.hostname.toLowerCase();
     if (source === "naukri") return /(?:^|\.)naukri\.com$/.test(hostname) && /^\/(?:job-listings|jobs?)(?:[-/]|$)/i.test(url.pathname);
     if (source === "linkedin") return /(?:^|\.)linkedin\.com$/.test(hostname) && /\/jobs\//i.test(url.pathname);
@@ -136,47 +138,17 @@ export function isExpiredJob(job) {
 export function isQualityJob(job) {
   const title = normalizeJobText(job.title);
   const company = normalizeJobText(job.company);
-  const description = normalizeJobText(job.description);
+
   if (!title || title === "untitled job" || title === "job") return false;
   if (!company || company === "unknown" || company === "unknown company") return false;
   if (!job.applicationUrl) return false;
   if (isExcludedJobCompany(job.company)) return false;
   if (job.source && !isValidJobSourceUrl(job.source, job.applicationUrl)) return false;
-  if (description.startsWith("review the original") && description.includes("listing")) return false;
-  return description.length >= 20;
+
+  return true;
 }
 
-export function jobRoleKey(job) {
-  const seniorityRemoved = normalizeJobText(job.title)
-    .replace(/\b(senior|sr|junior|jr|lead|principal|staff|associate|intern|trainee|i|ii|iii|iv|1|2|3|4)\b/g, " ");
-  return `${normalizeJobText(job.company).replace(/\s+/g, "")}::${seniorityRemoved.replace(/\s+/g, " ").trim()}`;
-}
-
-export function deduplicateJobs(jobs) {
-  const seen = new Set();
-  return jobs.filter((job) => {
-    if (!isQualityJob(job)) return false;
-    // A company can appear under different display names across a bundled
-    // source list and a deployment override. The same apply URL is the stable
-    // identity for those duplicate ATS records.
-    let postingUrl = "";
-    try {
-      const url = new URL(job.applicationUrl);
-      for (const key of [...url.searchParams.keys()]) {
-        if (/^(utm_.+|oga|source|ref|trackingid)$/i.test(key)) url.searchParams.delete(key);
-      }
-      url.searchParams.sort();
-      url.hash = "";
-      postingUrl = url.toString().replace(/\/$/, "").toLowerCase();
-    } catch {
-      // Keep the company/title fallback for malformed or missing URLs.
-    }
-    const key = postingUrl || jobRoleKey(job);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
+export function deduplicateJobs(jobs) { return collapsePostings(jobs.filter(isQualityJob)); }
 
 async function searchLocation({ appId, appKey, country, query, location, resultsPerPage }) {
   if (Date.now() < adzunaRateLimitedUntil) {
@@ -268,7 +240,7 @@ export async function discoverJobs(profile) {
       company,
       location: job.location?.display_name || "",
       description: job.description || `${title} at ${company}. Apply through the source listing.`,
-      requiredSkills: extractSkills(`${title} ${job.description || ""}`),
+      requiredSkills: [],
       salaryMin: job.salary_min,
       salaryMax: job.salary_max,
       salaryCurrency: job.salary_currency || "INR",
